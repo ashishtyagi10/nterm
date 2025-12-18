@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock, mpsc},
     thread,
-    time::{Duration},
+    time::Duration,
 };
 use tui_textarea::{TextArea, CursorMove};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -107,6 +107,7 @@ struct App<'a> {
     visible_items: Vec<VisibleItem>,
     selected_file_idx: usize,
     file_tree_state: ListState,
+    file_tree_scroll_offset: usize,
     file_tree_scroll_state: ScrollbarState,
     
     editor: TextArea<'a>,
@@ -205,6 +206,7 @@ impl<'a> App<'a> {
             visible_items: Vec::new(),
             selected_file_idx: 0,
             file_tree_state: ListState::default(),
+            file_tree_scroll_offset: 0,
             file_tree_scroll_state: ScrollbarState::default(),
             
             editor,
@@ -269,15 +271,58 @@ impl<'a> App<'a> {
     }
 
     fn load_selected_file(&mut self) {
-        if let Some(item) = self.visible_items.get(self.selected_file_idx) {
+        let path_to_load = if let Some(item) = self.visible_items.get(self.selected_file_idx) {
             if !item.is_dir {
-                if let Ok(content) = fs::read_to_string(&item.path) {
-                    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-                    self.editor = TextArea::from(lines);
-                    self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", item.name)));
-                    self.editor.move_cursor(CursorMove::Top);
-                }
+                Some((item.path.clone(), item.name.clone()))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        if let Some((path, name)) = path_to_load {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                self.editor = TextArea::from(lines.clone());
+                self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", name)));
+                self.editor.move_cursor(CursorMove::Top);
+                
+                self.apply_simple_highlighting(&path);
+            }
+        }
+    }
+    
+    fn apply_simple_highlighting(&mut self, path: &PathBuf) {
+        let keywords = if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            match ext {
+                "rs" => "fn|let|mut|struct|impl|enum|match|if|else|loop|while|for|return|pub|use|mod|crate",
+                "py" => "def|class|if|else|elif|while|for|return|import|from|try|except|with|as|pass|lambda",
+                "js" | "ts" => "function|const|let|var|if|else|while|for|return|import|export|class|interface|type",
+                "go" => "func|package|import|var|const|type|struct|interface|if|else|for|return|go|defer",
+                "c" | "cpp" | "h" => "int|char|void|if|else|while|for|return|struct|class|public|private|protected",
+                "html" => "div|span|html|body|head|script|style|link|meta|title|h1|h2|h3|p|a|img|ul|ol|li",
+                "css" => "color|background|margin|padding|border|display|position|width|height|font|text",
+                "json" => "true|false|null",
+                "md" => "#|\\*|-", 
+                "toml" => "\\[|\\]", 
+                _ => "",
+            }
+        } else {
+            ""
+        };
+
+        if !keywords.is_empty() {
+            let pattern = if keywords.chars().any(|c| !c.is_alphanumeric() && c != '|') {
+                keywords.to_string() 
+            } else {
+                 format!("\\b({})\\b", keywords)
+            };
+            
+            self.editor.set_search_pattern(pattern).ok();
+            self.editor.set_search_style(Style::default().fg(Color::Magenta));
+        } else {
+             self.editor.set_search_pattern("").ok();
         }
     }
 }
@@ -348,7 +393,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
         // Update Scrollbar States
         app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.selected_file_idx);
         app.editor_scroll_state = app.editor_scroll_state.content_length(app.editor.lines().len()).position(app.editor.cursor().0);
-        let chat_lines = app.chat_history.join("\n").lines().count(); 
+        let chat_lines = app.chat_history.join("\n\n").lines().count(); 
         app.chat_scroll_state = app.chat_scroll_state.content_length(chat_lines).position(app.chat_scroll as usize);
         
         terminal.draw(|f| ui(f, app))?;
@@ -365,7 +410,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                             .position(scrollback as usize);
                     }
                 },
-                AppEvent::Tick => {}, // No-op for now
+                AppEvent::Tick => {}, // No-op for tick events
                 AppEvent::Input(input) => {
                     match input {
                         Event::Mouse(mouse) => {
@@ -384,20 +429,16 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 ActivePanel::FileTree => {
                                     match mouse.kind {
                                         event::MouseEventKind::ScrollDown => {
-                                            if app.selected_file_idx < app.visible_items.len().saturating_sub(1) {
-                                                app.selected_file_idx += 1;
-                                                app.file_tree_state.select(Some(app.selected_file_idx));
-                                                app.load_selected_file();
+                                            if app.file_tree_scroll_offset < app.visible_items.len().saturating_sub(1) {
+                                                app.file_tree_scroll_offset += 1;
                                             }
                                         },
                                         event::MouseEventKind::ScrollUp => {
-                                            if app.selected_file_idx > 0 {
-                                                app.selected_file_idx -= 1;
-                                                app.file_tree_state.select(Some(app.selected_file_idx));
-                                                app.load_selected_file();
+                                            if app.file_tree_scroll_offset > 0 {
+                                                app.file_tree_scroll_offset -= 1;
                                             }
                                         },
-                                        _ => {} // Ignore other mouse events for now
+                                        _ => {}
                                     }
                                 },
                                 ActivePanel::Editor => {
@@ -569,31 +610,53 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     // File Tree
-    let items: Vec<ListItem> = app.visible_items.iter().enumerate().map(|(i, item)| {
-        let style = if i == app.selected_file_idx {
-            Style::default().bg(Color::Blue).fg(Color::White)
-        } else {
-            Style::default()
-        };
-        
-        let prefix = if item.is_dir {
-            if item.expanded { "v " } else { "+ " }
-        } else {
-            "- "
-        };
-        
-        let indent = "  ".repeat(item.depth);
-        let content = format!("{}{}{}", indent, prefix, item.name);
-        
-        ListItem::new(content).style(style)
-    }).collect();
+    let height = chunks[0].height as usize;
+    // Adjust scroll offset if selection moves out of view (keyboard nav)
+    // This logic should ideally be in update loop, but here is okay for simple sync
+    if app.selected_file_idx < app.file_tree_scroll_offset {
+        app.file_tree_scroll_offset = app.selected_file_idx;
+    } else if app.selected_file_idx >= app.file_tree_scroll_offset + height {
+        app.file_tree_scroll_offset = app.selected_file_idx - height + 1;
+    }
+
+    let items: Vec<ListItem> = app.visible_items.iter()
+        .skip(app.file_tree_scroll_offset)
+        .take(height)
+        .enumerate()
+        .map(|(i, item)| {
+            let actual_idx = app.file_tree_scroll_offset + i;
+            let style = if actual_idx == app.selected_file_idx {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else {
+                Style::default()
+            };
+            
+            let prefix = if item.is_dir {
+                if item.expanded { "v " } else { "+ " }
+            } else {
+                "- "
+            };
+            
+            let indent = "  ".repeat(item.depth);
+            let content = format!("{}{}{}", indent, prefix, item.name);
+            
+            ListItem::new(content).style(style)
+        }).collect();
     
     let file_tree_block = Block::default()
         .title(" File Tree ")
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(Color::Yellow) } else { Style::default() });
     
+    // We are manually handling selection style above, so we pass None to state to avoid double styling/confusion
+    // or we can rely on manual styling entirely and just use state for nothing?
+    // Ratatui List highlights item at state.selected().
+    // If we manually styled it, we can set state.select(None).
+    app.file_tree_state.select(None);
+    
     f.render_stateful_widget(List::new(items).block(file_tree_block), chunks[0], &mut app.file_tree_state);
+    
+    app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.file_tree_scroll_offset);
     
     f.render_stateful_widget(
         Scrollbar::default()
@@ -620,7 +683,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let mut editor = app.editor.clone();
     let editor_title = if let Some(item) = app.visible_items.get(app.selected_file_idx) {
         if !item.is_dir {
-             format!(" Editor - {} ", item.name) 
+             format!(" Editor - {} ", item.name)
         } else {
             " Editor ".to_string()
         }
@@ -653,7 +716,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(terminal_block);
     f.render_widget(pseudo_term, middle_chunks[1]);
     
-    // Terminal Scrollbar
     let terminal_scrollbar = Scrollbar::default()
         .orientation(ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("▲"))
