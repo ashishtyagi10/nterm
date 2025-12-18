@@ -7,7 +7,7 @@ use ratatui::{
     },
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::{
@@ -19,7 +19,7 @@ use std::{
     thread,
     time::{Duration},
 };
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, CursorMove};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tui_term::widget::PseudoTerminal;
 
@@ -106,9 +106,17 @@ struct App<'a> {
     file_tree: Vec<FileNode>,
     visible_items: Vec<VisibleItem>,
     selected_file_idx: usize,
+    file_tree_state: ListState,
+    file_tree_scroll_state: ScrollbarState,
+    
     editor: TextArea<'a>,
+    editor_scroll_state: ScrollbarState,
+    
     chat_input: TextArea<'a>,
     chat_history: Vec<String>,
+    chat_scroll: u16,
+    chat_scroll_state: ScrollbarState,
+    
     active_panel: ActivePanel,
     should_quit: bool,
     
@@ -196,9 +204,17 @@ impl<'a> App<'a> {
             file_tree: Vec::new(),
             visible_items: Vec::new(),
             selected_file_idx: 0,
+            file_tree_state: ListState::default(),
+            file_tree_scroll_state: ScrollbarState::default(),
+            
             editor,
+            editor_scroll_state: ScrollbarState::default(),
+            
             chat_input,
             chat_history: vec!["Hello! I'm your AI assistant. Press Tab to switch panels.".to_string()],
+            chat_scroll: 0,
+            chat_scroll_state: ScrollbarState::default(),
+            
             active_panel: ActivePanel::FileTree,
             should_quit: false,
             pty_writer: writer,
@@ -208,6 +224,7 @@ impl<'a> App<'a> {
             event_rx: rx,
         };
         
+        app.file_tree_state.select(Some(0));
         app.refresh_file_tree();
         app
     }
@@ -258,6 +275,7 @@ impl<'a> App<'a> {
                     let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
                     self.editor = TextArea::from(lines);
                     self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", item.name)));
+                    self.editor.move_cursor(CursorMove::Top);
                 }
             }
         }
@@ -327,32 +345,82 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
             return Ok(());
         }
         
+        // Update Scrollbar States
+        app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.selected_file_idx);
+        app.editor_scroll_state = app.editor_scroll_state.content_length(app.editor.lines().len()).position(app.editor.cursor().0);
+        let chat_lines = app.chat_history.join("\n").lines().count(); 
+        app.chat_scroll_state = app.chat_scroll_state.content_length(chat_lines).position(app.chat_scroll as usize);
+        
         terminal.draw(|f| ui(f, app))?;
 
         // Wait for event
         if let Ok(event) = app.event_rx.recv() {
             match event {
                 AppEvent::PtyData => {
-                    // Update scrollbar state based on terminal content size
                     if let Ok(screen) = app.terminal_screen.read() {
                          let scrollback = screen.screen().scrollback();
-                         // Simply update the length. Position is always at bottom (length) for now.
-                         app.terminal_scroll_state = app.terminal_scroll_state.content_length(scrollback as usize).position(scrollback as usize);
+                         let height = screen.screen().size().0;
+                         app.terminal_scroll_state = app.terminal_scroll_state
+                            .content_length(scrollback as usize + height as usize)
+                            .position(scrollback as usize);
                     }
                 },
-                AppEvent::Tick => {},
+                AppEvent::Tick => {}, // No-op for now
                 AppEvent::Input(input) => {
                     match input {
                         Event::Mouse(mouse) => {
-                            if app.active_panel == ActivePanel::Terminal {
-                                 let input_bytes = match mouse.kind {
-                                    event::MouseEventKind::ScrollDown => vec![27, 91, 66], 
-                                    event::MouseEventKind::ScrollUp => vec![27, 91, 65],   
-                                    _ => vec![],
-                                };
-                                if !input_bytes.is_empty() {
-                                    let _ = app.pty_writer.write_all(&input_bytes);
-                                    let _ = app.pty_writer.flush();
+                            match app.active_panel {
+                                ActivePanel::Terminal => {
+                                     let input_bytes = match mouse.kind {
+                                        event::MouseEventKind::ScrollDown => vec![27, 91, 66], 
+                                        event::MouseEventKind::ScrollUp => vec![27, 91, 65],   
+                                        _ => vec![],
+                                    };
+                                    if !input_bytes.is_empty() {
+                                        let _ = app.pty_writer.write_all(&input_bytes);
+                                        let _ = app.pty_writer.flush();
+                                    }
+                                },
+                                ActivePanel::FileTree => {
+                                    match mouse.kind {
+                                        event::MouseEventKind::ScrollDown => {
+                                            if app.selected_file_idx < app.visible_items.len().saturating_sub(1) {
+                                                app.selected_file_idx += 1;
+                                                app.file_tree_state.select(Some(app.selected_file_idx));
+                                                app.load_selected_file();
+                                            }
+                                        },
+                                        event::MouseEventKind::ScrollUp => {
+                                            if app.selected_file_idx > 0 {
+                                                app.selected_file_idx -= 1;
+                                                app.file_tree_state.select(Some(app.selected_file_idx));
+                                                app.load_selected_file();
+                                            }
+                                        },
+                                        _ => {} // Ignore other mouse events for now
+                                    }
+                                },
+                                ActivePanel::Editor => {
+                                     match mouse.kind {
+                                        event::MouseEventKind::ScrollDown => {
+                                            app.editor.move_cursor(CursorMove::Down);
+                                        },
+                                        event::MouseEventKind::ScrollUp => {
+                                            app.editor.move_cursor(CursorMove::Up);
+                                        },
+                                        _ => {} // Ignore other mouse events for now
+                                    }
+                                },
+                                ActivePanel::Chat => {
+                                    match mouse.kind {
+                                        event::MouseEventKind::ScrollDown => {
+                                            app.chat_scroll = app.chat_scroll.saturating_add(1);
+                                        },
+                                        event::MouseEventKind::ScrollUp => {
+                                            app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                        },
+                                        _ => {} // Ignore other mouse events for now
+                                    }
                                 }
                             }
                         },
@@ -387,6 +455,10 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                                 app.chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
                                                 app.chat_history.push("AI: I see you're working on this project. How can I help with the code?".to_string());
                                             }
+                                        } else if key.code == KeyCode::Up {
+                                            app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                        } else if key.code == KeyCode::Down {
+                                            app.chat_scroll = app.chat_scroll.saturating_add(1);
                                         } else {
                                             app.chat_input.input(key);
                                         }
@@ -396,12 +468,14 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                             KeyCode::Up => {
                                                 if app.selected_file_idx > 0 {
                                                     app.selected_file_idx -= 1;
+                                                    app.file_tree_state.select(Some(app.selected_file_idx));
                                                     app.load_selected_file();
                                                 }
                                             }
                                             KeyCode::Down => {
                                                 if app.selected_file_idx < app.visible_items.len().saturating_sub(1) {
                                                     app.selected_file_idx += 1;
+                                                    app.file_tree_state.select(Some(app.selected_file_idx));
                                                     app.load_selected_file();
                                                 }
                                             }
@@ -429,7 +503,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                                     }
                                                 }
                                             }
-                                            _ => {}
+                                            _ => {} // Ignore other key presses for now
                                         }
                                     }
                                     ActivePanel::Terminal => {
@@ -440,10 +514,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                                         'h' => {
                                                             // Dump history to editor
                                                             if let Ok(buffer) = app.history_buffer.read() {
-                                                                let content = String::from_utf8_lossy(&buffer);
-                                                                // Simple ANSI strip (very basic)
                                                                 let clean_content = String::from_utf8_lossy(&buffer).to_string(); 
-                                                                // A real ansi strip would be better, but for now raw is okay or we assume user uses "cat"
                                                                 let lines: Vec<String> = clean_content.lines().map(|s| s.to_string()).collect();
                                                                 app.editor = TextArea::from(lines);
                                                                 app.editor.set_block(Block::default().borders(Borders::ALL).title(" Editor - Terminal History "));
@@ -479,7 +550,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 }
                             }
                         }
-                        _ => {}
+                        _ => {} // Ignore other event types for now
                     }
                 }
             }
@@ -487,7 +558,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
     }
 }
 
-fn ui(f: &mut Frame, app: &App) {
+fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -521,7 +592,17 @@ fn ui(f: &mut Frame, app: &App) {
         .title(" File Tree ")
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(Color::Yellow) } else { Style::default() });
-    f.render_widget(List::new(items).block(file_tree_block), chunks[0]);
+    
+    f.render_stateful_widget(List::new(items).block(file_tree_block), chunks[0], &mut app.file_tree_state);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        chunks[0],
+        &mut app.file_tree_scroll_state
+    );
 
     // Editor & Terminal
     let (editor_percent, terminal_percent) = if app.active_panel == ActivePanel::Terminal {
@@ -539,7 +620,7 @@ fn ui(f: &mut Frame, app: &App) {
     let mut editor = app.editor.clone();
     let editor_title = if let Some(item) = app.visible_items.get(app.selected_file_idx) {
         if !item.is_dir {
-             format!(" Editor - {} ", item.name)
+             format!(" Editor - {} ", item.name) 
         } else {
             " Editor ".to_string()
         }
@@ -551,6 +632,15 @@ fn ui(f: &mut Frame, app: &App) {
         .title(editor_title)
         .border_style(if app.active_panel == ActivePanel::Editor { Style::default().fg(Color::Yellow) } else { Style::default() }));
     f.render_widget(&editor, middle_chunks[0]);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        middle_chunks[0],
+        &mut app.editor_scroll_state
+    );
 
     // Terminal
     let terminal_block = Block::default()
@@ -558,20 +648,24 @@ fn ui(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(Color::Yellow) } else { Style::default() });
 
-    // Render PTY
     let screen = app.terminal_screen.read().unwrap();
     let pseudo_term = PseudoTerminal::new(screen.screen())
         .block(terminal_block);
     f.render_widget(pseudo_term, middle_chunks[1]);
     
-    // Render Scrollbar
+    // Terminal Scrollbar
+    let terminal_scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("▲"))
+        .end_symbol(Some("▼"));
+    
+    let mut terminal_scroll_state = app.terminal_scroll_state
+        .viewport_content_length(middle_chunks[1].height as usize);
+        
     f.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼")),
+        terminal_scrollbar,
         middle_chunks[1],
-        &mut app.terminal_scroll_state.clone()
+        &mut terminal_scroll_state
     );
 
     // Chat
@@ -586,14 +680,21 @@ fn ui(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() });
     
-    // We render a Paragraph with wrapping
-    // To enable scrolling in the future, we would need to track line count.
-    // For now, this ensures text fits horizontally.
     let chat_paragraph = Paragraph::new(chat_text)
         .block(chat_history_block)
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: true })
+        .scroll((app.chat_scroll, 0));
         
     f.render_widget(chat_paragraph, chat_chunks[0]);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        chat_chunks[0],
+        &mut app.chat_scroll_state
+    );
 
     let mut chat_input = app.chat_input.clone();
     chat_input.set_block(Block::default()
