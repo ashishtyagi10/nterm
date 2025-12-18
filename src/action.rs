@@ -10,5 +10,6 @@ pub enum Action {
     ExpandDir,
     CollapseDir,
     Open,
+    FileSearch,
     None,
 }

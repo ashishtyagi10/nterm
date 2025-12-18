@@ -11,11 +11,12 @@ use std::{
     sync::{Arc, RwLock, mpsc},
     thread,
     time::Duration,
+    sync::Mutex,
 };
 use tui_textarea::{TextArea, CursorMove};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use syntect::parsing::SyntaxSet;
-use syntect::highlighting::ThemeSet;
+use walkdir::WalkDir;
+use arboard::Clipboard;
 
 use crate::action::Action;
 use crate::file_tree::{FileNode, VisibleItem, flatten_node, toggle_node_recursive};
@@ -50,6 +51,11 @@ pub struct App<'a> {
     pub chat_scroll: u16,
     pub chat_scroll_state: ScrollbarState,
     
+    pub is_searching: bool,
+    pub search_input: TextArea<'a>,
+    pub search_results: Vec<PathBuf>,
+    pub search_state: ListState,
+
     pub active_panel: ActivePanel,
     pub should_quit: bool,
     
@@ -57,15 +63,18 @@ pub struct App<'a> {
     pub pty_writer: Box<dyn Write + Send>,
     pub terminal_screen: Arc<RwLock<tui_term::vt100::Parser>>,
     pub terminal_scroll_state: ScrollbarState,
-    pub history_buffer: Arc<RwLock<Vec<u8>> >,
+    pub history_buffer: Arc<RwLock<Vec<u8>>>,
     pub event_rx: mpsc::Receiver<AppEvent>,
     
-    // Syntax Highlighting
-    pub syntax_set: SyntaxSet,
-    pub theme_set: ThemeSet,
+        // Clipboard
     
-    // Menus & Keys
-    pub menu_titles: Vec<String>,
+        pub clipboard: Option<Arc<Mutex<Clipboard>>>,
+    
+        
+    
+        // Menus & Keys
+    
+        pub menu_titles: Vec<String>,
     pub menu_open_idx: Option<usize>,
     pub key_map: HashMap<(KeyCode, KeyModifiers), Action>,
 }
@@ -78,6 +87,9 @@ impl<'a> App<'a> {
         
         let mut chat_input = TextArea::default();
         chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
+        
+        let mut search_input = TextArea::default();
+        search_input.set_block(Block::default().borders(Borders::ALL).title(" Search Files "));
 
         // Initialize PTY
         let pty_system = NativePtySystem::default();
@@ -143,9 +155,8 @@ impl<'a> App<'a> {
             }
         });
         
-        // Syntect init
-        let syntax_set = SyntaxSet::load_defaults_newlines();
-        let theme_set = ThemeSet::load_defaults();
+        // Clipboard
+        let clipboard = Clipboard::new().ok().map(|c| Arc::new(Mutex::new(c)));
         
         // Key Binding Init
         let mut key_map = HashMap::new();
@@ -155,6 +166,7 @@ impl<'a> App<'a> {
         key_map.insert((KeyCode::F(1), KeyModifiers::NONE), Action::ToggleMenu);
         key_map.insert((KeyCode::Char('r'), KeyModifiers::CONTROL), Action::ResetLayout);
         key_map.insert((KeyCode::Char('h'), KeyModifiers::CONTROL), Action::DumpHistory);
+        key_map.insert((KeyCode::Char('p'), KeyModifiers::CONTROL), Action::FileSearch);
 
         let mut app = Self {
             file_tree: Vec::new(),
@@ -172,6 +184,11 @@ impl<'a> App<'a> {
             chat_scroll: 0,
             chat_scroll_state: ScrollbarState::default(),
             
+            is_searching: false,
+            search_input,
+            search_results: Vec::new(),
+            search_state: ListState::default(),
+            
             active_panel: ActivePanel::FileTree,
             should_quit: false,
             pty_writer: writer,
@@ -180,8 +197,7 @@ impl<'a> App<'a> {
             history_buffer: history,
             event_rx: rx,
             
-            syntax_set,
-            theme_set,
+            clipboard,
             
             menu_titles: vec![" File ".to_string(), " Edit ".to_string(), " View ".to_string(), " Help ".to_string()],
             menu_open_idx: None,
@@ -244,29 +260,42 @@ impl<'a> App<'a> {
         };
 
         if let Some((path, name)) = path_to_load {
-                            if let Ok(content) = fs::read_to_string(&path) {
-                                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-                                self.editor = TextArea::from(lines.clone());
-                                self.editor.set_line_number_style(Style::default().fg(Color::DarkGray));
-                                self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", name)));
-                                self.editor.move_cursor(CursorMove::Top);
-                                
-                                self.apply_simple_highlighting(&path);
-                            }        }
+            if let Ok(content) = fs::read_to_string(&path) {
+                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                self.editor = TextArea::from(lines.clone());
+                self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", name)));
+                self.editor.set_line_number_style(Style::default().fg(Color::DarkGray));
+                self.editor.move_cursor(CursorMove::Top);
+                
+                self.apply_simple_highlighting(&path);
+            }
+        }
+    }
+    
+    pub fn load_file_path(&mut self, path: PathBuf) {
+        if let Ok(content) = fs::read_to_string(&path) {
+            let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.editor = TextArea::from(lines.clone());
+            self.editor.set_block(Block::default().borders(Borders::ALL).title(format!(" Editor - {} ", name)));
+            self.editor.set_line_number_style(Style::default().fg(Color::DarkGray));
+            self.editor.move_cursor(CursorMove::Top);
+            self.apply_simple_highlighting(&path);
+        }
     }
     
     fn apply_simple_highlighting(&mut self, path: &PathBuf) {
         let keywords = if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             match ext {
-                "rs" => "fn|let|mut|struct|impl|enum|match|if|else|loop|while|for|return|pub|use|mod|crate",
-                "py" => "def|class|if|else|elif|while|for|return|import|from|try|except|with|as|pass|lambda",
-                "js" | "ts" => "function|const|let|var|if|else|while|for|return|import|export|class|interface|type",
-                "go" => "func|package|import|var|const|type|struct|interface|if|else|for|return|go|defer",
-                "c" | "cpp" | "h" => "int|char|void|if|else|while|for|return|struct|class|public|private|protected",
-                "html" => "div|span|html|body|head|script|style|link|meta|title|h1|h2|h3|p|a|img|ul|ol|li",
-                "css" => "color|background|margin|padding|border|display|position|width|height|font|text",
+                "rs" => "fn|let|mut|struct|impl|enum|match|if|else|loop|while|for|return|pub|use|mod|crate|type|trait|where|as|async|await|move|const|static",
+                "py" => "def|class|if|else|elif|while|for|return|import|from|try|except|with|as|pass|lambda|None|True|False",
+                "js" | "ts" | "jsx" | "tsx" => "function|const|let|var|if|else|while|for|return|import|export|class|interface|type|extends|implements|new|this|null|undefined|true|false",
+                "go" => "func|package|import|var|const|type|struct|interface|if|else|for|return|go|defer|range|map|chan|true|false|nil",
+                "c" | "cpp" | "h" | "hpp" => "int|char|void|if|else|while|for|return|struct|class|public|private|protected|virtual|static|const|bool|true|false|nullptr",
+                "html" => "div|span|html|body|head|script|style|link|meta|title|h1|h2|h3|p|a|img|ul|ol|li|table|tr|td|th",
+                "css" => "color|background|margin|padding|border|display|position|width|height|font|text|flex|grid",
                 "json" => "true|false|null",
-                "md" => "#|\\*|-", 
+                "md" => "#|\\*|-|`", 
                 "toml" => "\\[|\\]", 
                 _ => "",
             }
@@ -286,5 +315,32 @@ impl<'a> App<'a> {
         } else {
              self.editor.set_search_pattern("").ok();
         }
+    }
+
+    pub fn on_search_input(&mut self) {
+        let query = self.search_input.lines().join(" ");
+        if query.trim().is_empty() {
+            self.search_results.clear();
+            return;
+        }
+        
+        let query_lower = query.to_lowercase();
+        self.search_results = WalkDir::new(".")
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| !e.path().to_string_lossy().starts_with("./.git"))
+            .filter(|e| !e.path().to_string_lossy().contains("/target/"))
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| s.to_lowercase().contains(&query_lower))
+                    .unwrap_or(false)
+            })
+            .take(20)
+            .map(|e| e.path().to_path_buf())
+            .collect();
+            
+        self.search_state.select(Some(0));
     }
 }

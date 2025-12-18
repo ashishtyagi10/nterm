@@ -70,7 +70,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             };
             
             let prefix = if item.is_dir {
-                if item.expanded { "v " } else { "+ " }
+                if item.expanded { "v " } else { "+ " } 
             } else {
                 "- "
             };
@@ -113,19 +113,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
     // Editor
     let mut editor = app.editor.clone();
-    let editor_title = if let Some(item) = app.visible_items.get(app.selected_file_idx) {
-        if !item.is_dir {
-             format!(" Editor - {} ", item.name) 
-        } else {
-            " Editor ".to_string()
-        }
-    } else {
-        " Editor ".to_string()
-    };
-    editor.set_block(Block::default()
-        .borders(Borders::ALL)
-        .title(editor_title)
-        .border_style(if app.active_panel == ActivePanel::Editor { Style::default().fg(Color::Yellow) } else { Style::default() }));
+    // Update title dynamically if needed, but we set it on load.
+    // Ensure active style is applied.
+    let current_block = editor.block().cloned().unwrap_or_else(|| Block::default().borders(Borders::ALL));
+    editor.set_block(current_block.border_style(if app.active_panel == ActivePanel::Editor { Style::default().fg(Color::Yellow) } else { Style::default() }));
+    
     f.render_widget(&editor, middle_chunks[0]);
     
     f.render_stateful_widget(
@@ -217,4 +209,53 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             area
         );
     }
+
+    // --- Search Modal ---
+    if app.is_searching {
+        let area = centered_rect(60, 50, f.area());
+        f.render_widget(Clear, area);
+        
+        let block = Block::default()
+            .title(" File Search (Esc to Close) ")
+            .borders(Borders::ALL);
+        f.render_widget(block.clone(), area);
+        
+        let inner_area = block.inner(area);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(inner_area);
+            
+        f.render_widget(&app.search_input, chunks[0]);
+        
+        let items: Vec<ListItem> = app.search_results.iter()
+            .map(|p| ListItem::new(p.to_string_lossy().into_owned()))
+            .collect();
+            
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::TOP))
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            
+        f.render_stateful_widget(list, chunks[1], &mut app.search_state);
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

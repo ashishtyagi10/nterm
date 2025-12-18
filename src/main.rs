@@ -92,6 +92,41 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                 AppEvent::Tick => {}, // No-op for tick events
                 AppEvent::Input(input) => {
                     if let Event::Key(key) = input {
+                        // Search Mode Handling
+                        if app.is_searching {
+                            match key.code {
+                                KeyCode::Esc => app.is_searching = false,
+                                KeyCode::Enter => {
+                                    if let Some(idx) = app.search_state.selected() {
+                                        if let Some(path) = app.search_results.get(idx).cloned() {
+                                            app.load_file_path(path);
+                                            app.active_panel = ActivePanel::Editor;
+                                            app.is_searching = false;
+                                        }
+                                    }
+                                },
+                                KeyCode::Up => {
+                                    let i = match app.search_state.selected() {
+                                        Some(i) => if i == 0 { app.search_results.len().saturating_sub(1) } else { i - 1 },
+                                        None => 0,
+                                    };
+                                    app.search_state.select(Some(i));
+                                },
+                                KeyCode::Down => {
+                                    let i = match app.search_state.selected() {
+                                        Some(i) => if i >= app.search_results.len().saturating_sub(1) { 0 } else { i + 1 },
+                                        None => 0,
+                                    };
+                                    app.search_state.select(Some(i));
+                                },
+                                _ => {
+                                    app.search_input.input(key);
+                                    app.on_search_input();
+                                }
+                            }
+                            continue;
+                        }
+
                         // Check Global Actions
                         if let Some(action) = app.key_map.get(&(key.code, key.modifiers)) {
                             match action {
@@ -121,9 +156,17 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                         app.active_panel = ActivePanel::Editor;
                                     }
                                 },
-                                _ => {} // Other actions like ScrollUp/Down, ExpandDir etc. are context-specific
+                                Action::FileSearch => {
+                                    app.is_searching = !app.is_searching;
+                                    if app.is_searching {
+                                        // Focus search, maybe clear input?
+                                        // app.search_input = TextArea::default(); // Optional: Clear on open
+                                        app.on_search_input(); // Refresh
+                                    }
+                                },
+                                _ => {}
                             }
-                            continue; // Action handled, skip specific panel processing.
+                            continue;
                         }
                         
                         // Close menu on Esc if not handled by action
@@ -296,19 +339,23 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                     }
                                     ActivePanel::Terminal => {
                                         let input_bytes = match key.code {
+                                            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                                if let Some(clipboard) = &app.clipboard {
+                                                    if let Ok(mut clipboard) = clipboard.lock() {
+                                                        if let Ok(text) = clipboard.get_text() {
+                                                            let _ = app.pty_writer.write_all(text.as_bytes());
+                                                            let _ = app.pty_writer.flush();
+                                                        }
+                                                    }
+                                                }
+                                                vec![] // Don't send ^V to PTY
+                                            },
                                             KeyCode::Char(c) => {
                                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                                    // Map specific Ctrl keys that are NOT global actions
-                                                    // Actually we should just forward all chars with ctrl if not intercepted
-                                                    // Since we handle global actions BEFORE this match, 
-                                                    // Ctrl+Q is already eaten.
-                                                    // Ctrl+C will come here.
                                                     match c {
                                                         'c' => vec![3], 
                                                         'd' => vec![4], 
                                                         'z' => vec![26], 
-                                                        // What about other ctrls? 'l', 'a', 'e'?
-                                                        // Better to genericize: c & 0x1f
                                                         c => vec![(c as u8) & 0x1f],
                                                     }
                                                 } else {
