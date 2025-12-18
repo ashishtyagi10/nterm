@@ -338,6 +338,20 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                         app.load_selected_file();
                                     }
                                 }
+                                KeyCode::Right => {
+                                    if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+                                        if item.is_dir && !item.expanded {
+                                            app.toggle_selected_dir();
+                                        }
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+                                        if item.is_dir && item.expanded {
+                                            app.toggle_selected_dir();
+                                        }
+                                    }
+                                }
                                 KeyCode::Enter => {
                                     if let Some(item) = app.visible_items.get(app.selected_file_idx) {
                                         if item.is_dir {
