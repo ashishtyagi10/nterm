@@ -7,11 +7,21 @@ use ratatui::{
     },
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
-use std::{error::Error, fs, io, path::PathBuf};
+use std::{
+    error::Error,
+    fs,
+    io::{self, Read, Write},
+    path::PathBuf,
+    sync::{Arc, RwLock, mpsc},
+    thread,
+    time::{Duration},
+};
 use tui_textarea::TextArea;
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use tui_term::widget::PseudoTerminal;
 
 #[derive(PartialEq)]
 enum ActivePanel {
@@ -86,6 +96,12 @@ struct VisibleItem {
     expanded: bool,
 }
 
+enum AppEvent {
+    Input(Event),
+    PtyData,
+    Tick,
+}
+
 struct App<'a> {
     file_tree: Vec<FileNode>,
     visible_items: Vec<VisibleItem>,
@@ -93,10 +109,15 @@ struct App<'a> {
     editor: TextArea<'a>,
     chat_input: TextArea<'a>,
     chat_history: Vec<String>,
-    terminal_logs: Vec<String>,
-    terminal_input: String,
     active_panel: ActivePanel,
     should_quit: bool,
+    
+    // Terminal State
+    pty_writer: Box<dyn Write + Send>,
+    terminal_screen: Arc<RwLock<tui_term::vt100::Parser>>,
+    terminal_scroll_state: ScrollbarState,
+    history_buffer: Arc<RwLock<Vec<u8>>>,
+    event_rx: mpsc::Receiver<AppEvent>,
 }
 
 impl<'a> App<'a> {
@@ -107,6 +128,70 @@ impl<'a> App<'a> {
         let mut chat_input = TextArea::default();
         chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
 
+        // Initialize PTY
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system.openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }).expect("Failed to create PTY");
+
+        let cmd = CommandBuilder::new("bash");
+        let _child = pair.slave.spawn_command(cmd).expect("Failed to spawn shell");
+
+        let mut reader = pair.master.try_clone_reader().expect("Failed to clone reader");
+        let writer = pair.master.take_writer().expect("Failed to take writer");
+
+        let parser = Arc::new(RwLock::new(tui_term::vt100::Parser::new(24, 80, 0)));
+        let parser_clone = parser.clone();
+        
+        let history = Arc::new(RwLock::new(Vec::new()));
+        let history_clone = history.clone();
+        
+        // Event Channel
+        let (tx, rx) = mpsc::channel();
+        let pty_tx = tx.clone();
+        let tick_tx = tx.clone();
+
+        // Spawn thread to read from PTY
+        thread::spawn(move || {
+            let mut buffer = [0u8; 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(n) if n > 0 => {
+                        let data = &buffer[..n];
+                        if let Ok(mut p) = parser_clone.write() {
+                            p.process(data);
+                        }
+                        if let Ok(mut h) = history_clone.write() {
+                            h.extend_from_slice(data);
+                        }
+                        let _ = pty_tx.send(AppEvent::PtyData);
+                    }
+                    Ok(_) => break, 
+                    Err(_) => break,
+                }
+            }
+        });
+        
+        // Input Thread
+        thread::spawn(move || {
+            loop {
+                if let Ok(event) = event::read() {
+                    let _ = tx.send(AppEvent::Input(event));
+                }
+            }
+        });
+        
+        // Tick Thread
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(250));
+                let _ = tick_tx.send(AppEvent::Tick);
+            }
+        });
+
         let mut app = Self {
             file_tree: Vec::new(),
             visible_items: Vec::new(),
@@ -114,10 +199,13 @@ impl<'a> App<'a> {
             editor,
             chat_input,
             chat_history: vec!["Hello! I'm your AI assistant. Press Tab to switch panels.".to_string()],
-            terminal_logs: vec!["nterm initialized.".to_string()],
-            terminal_input: String::new(),
             active_panel: ActivePanel::FileTree,
             should_quit: false,
+            pty_writer: writer,
+            terminal_screen: parser,
+            terminal_scroll_state: ScrollbarState::default(),
+            history_buffer: history,
+            event_rx: rx,
         };
         
         app.refresh_file_tree();
@@ -174,62 +262,7 @@ impl<'a> App<'a> {
             }
         }
     }
-    
-    fn execute_command(&mut self) {
-        let input = self.terminal_input.trim();
-        if input.is_empty() {
-            return;
-        }
-        
-        self.terminal_logs.push(format!("$ {}", input));
-        
-        let parts: Vec<&str> = input.split_whitespace().collect();
-        match parts.as_slice() {
-            ["exit"] => {
-                self.should_quit = true;
-            }
-            ["cd", path] => {
-                if std::env::set_current_dir(path).is_ok() {
-                    self.terminal_logs.push(format!("Changed directory to {}", path));
-                    self.refresh_file_tree();
-                    self.selected_file_idx = 0;
-                } else {
-                    self.terminal_logs.push(format!("Failed to change directory to {}", path));
-                }
-            }
-            ["clear"] => {
-                self.terminal_logs.clear();
-            }
-            _ => {
-                use std::process::Command;
-                let output = Command::new("sh")
-                    .arg("-c")
-                    .arg(input)
-                    .output();
-                    
-                match output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        
-                        for line in stdout.lines() {
-                            self.terminal_logs.push(line.to_string());
-                        }
-                        for line in stderr.lines() {
-                            self.terminal_logs.push(line.to_string());
-                        }
-                    }
-                    Err(e) => {
-                        self.terminal_logs.push(format!("Error: {}", e));
-                    }
-                }
-            }
-        }
-        self.terminal_input.clear();
-    }
 }
-
-// Standalone functions to avoid borrow checker issues
 
 fn flatten_node(node: &FileNode, visible_items: &mut Vec<VisibleItem>) {
     visible_items.push(VisibleItem {
@@ -288,97 +321,165 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         if app.should_quit {
             return Ok(());
         }
+        
         terminal.draw(|f| ui(f, app))?;
 
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-                KeyCode::Tab => {
-                    app.active_panel = match app.active_panel {
-                        ActivePanel::FileTree => ActivePanel::Editor,
-                        ActivePanel::Editor => ActivePanel::Chat,
-                        ActivePanel::Chat => ActivePanel::Terminal,
-                        ActivePanel::Terminal => ActivePanel::FileTree,
-                    };
-                }
-                _ => {
-                    match app.active_panel {
-                        ActivePanel::Editor => {
-                            app.editor.input(key);
-                        }
-                        ActivePanel::Chat => {
-                            if key.code == KeyCode::Enter {
-                                let content = app.chat_input.lines()[0].clone();
-                                if !content.is_empty() {
-                                    app.chat_history.push(format!("You: {}", content));
-                                    app.chat_input = TextArea::default();
-                                    app.chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
-                                    app.chat_history.push("AI: I see you're working on this project. How can I help with the code?".to_string());
+        // Wait for event
+        if let Ok(event) = app.event_rx.recv() {
+            match event {
+                AppEvent::PtyData => {
+                    // Update scrollbar state based on terminal content size
+                    if let Ok(screen) = app.terminal_screen.read() {
+                         let scrollback = screen.screen().scrollback();
+                         // Simply update the length. Position is always at bottom (length) for now.
+                         app.terminal_scroll_state = app.terminal_scroll_state.content_length(scrollback as usize).position(scrollback as usize);
+                    }
+                },
+                AppEvent::Tick => {},
+                AppEvent::Input(input) => {
+                    match input {
+                        Event::Mouse(mouse) => {
+                            if app.active_panel == ActivePanel::Terminal {
+                                 let input_bytes = match mouse.kind {
+                                    event::MouseEventKind::ScrollDown => vec![27, 91, 66], 
+                                    event::MouseEventKind::ScrollUp => vec![27, 91, 65],   
+                                    _ => vec![],
+                                };
+                                if !input_bytes.is_empty() {
+                                    let _ = app.pty_writer.write_all(&input_bytes);
+                                    let _ = app.pty_writer.flush();
                                 }
+                            }
+                        },
+                        Event::Key(key) => {
+                            // Global Quit: Ctrl+Q
+                            if let KeyCode::Char('q') = key.code {
+                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                     return Ok(());
+                                 }
+                            }
+                            
+                            // Panel Switch: Tab
+                            if key.code == KeyCode::Tab {
+                                app.active_panel = match app.active_panel {
+                                    ActivePanel::FileTree => ActivePanel::Editor,
+                                    ActivePanel::Editor => ActivePanel::Chat,
+                                    ActivePanel::Chat => ActivePanel::Terminal,
+                                    ActivePanel::Terminal => ActivePanel::FileTree,
+                                };
                             } else {
-                                app.chat_input.input(key);
-                            }
-                        }
-                        ActivePanel::FileTree => {
-                            match key.code {
-                                KeyCode::Up => {
-                                    if app.selected_file_idx > 0 {
-                                        app.selected_file_idx -= 1;
-                                        app.load_selected_file();
+                                // Panel Specific Input
+                                match app.active_panel {
+                                    ActivePanel::Editor => {
+                                        app.editor.input(key);
                                     }
-                                }
-                                KeyCode::Down => {
-                                    if app.selected_file_idx < app.visible_items.len().saturating_sub(1) {
-                                        app.selected_file_idx += 1;
-                                        app.load_selected_file();
-                                    }
-                                }
-                                KeyCode::Right => {
-                                    if let Some(item) = app.visible_items.get(app.selected_file_idx) {
-                                        if item.is_dir && !item.expanded {
-                                            app.toggle_selected_dir();
-                                        }
-                                    }
-                                }
-                                KeyCode::Left => {
-                                    if let Some(item) = app.visible_items.get(app.selected_file_idx) {
-                                        if item.is_dir && item.expanded {
-                                            app.toggle_selected_dir();
-                                        }
-                                    }
-                                }
-                                KeyCode::Enter => {
-                                    if let Some(item) = app.visible_items.get(app.selected_file_idx) {
-                                        if item.is_dir {
-                                            app.toggle_selected_dir();
+                                    ActivePanel::Chat => {
+                                        if key.code == KeyCode::Enter {
+                                            let content = app.chat_input.lines()[0].clone();
+                                            if !content.is_empty() {
+                                                app.chat_history.push(format!("You: {}", content));
+                                                app.chat_input = TextArea::default();
+                                                app.chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
+                                                app.chat_history.push("AI: I see you're working on this project. How can I help with the code?".to_string());
+                                            }
                                         } else {
-                                            app.load_selected_file();
-                                            app.active_panel = ActivePanel::Editor;
+                                            app.chat_input.input(key);
+                                        }
+                                    }
+                                    ActivePanel::FileTree => {
+                                        match key.code {
+                                            KeyCode::Up => {
+                                                if app.selected_file_idx > 0 {
+                                                    app.selected_file_idx -= 1;
+                                                    app.load_selected_file();
+                                                }
+                                            }
+                                            KeyCode::Down => {
+                                                if app.selected_file_idx < app.visible_items.len().saturating_sub(1) {
+                                                    app.selected_file_idx += 1;
+                                                    app.load_selected_file();
+                                                }
+                                            }
+                                            KeyCode::Right => {
+                                                if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+                                                    if item.is_dir && !item.expanded {
+                                                        app.toggle_selected_dir();
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Left => {
+                                                if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+                                                    if item.is_dir && item.expanded {
+                                                        app.toggle_selected_dir();
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Enter => {
+                                                if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+                                                    if item.is_dir {
+                                                        app.toggle_selected_dir();
+                                                    } else {
+                                                        app.load_selected_file();
+                                                        app.active_panel = ActivePanel::Editor;
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    ActivePanel::Terminal => {
+                                        let input_bytes = match key.code {
+                                            KeyCode::Char(c) => {
+                                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                                    match c {
+                                                        'h' => {
+                                                            // Dump history to editor
+                                                            if let Ok(buffer) = app.history_buffer.read() {
+                                                                let content = String::from_utf8_lossy(&buffer);
+                                                                // Simple ANSI strip (very basic)
+                                                                let clean_content = String::from_utf8_lossy(&buffer).to_string(); 
+                                                                // A real ansi strip would be better, but for now raw is okay or we assume user uses "cat"
+                                                                let lines: Vec<String> = clean_content.lines().map(|s| s.to_string()).collect();
+                                                                app.editor = TextArea::from(lines);
+                                                                app.editor.set_block(Block::default().borders(Borders::ALL).title(" Editor - Terminal History "));
+                                                                app.active_panel = ActivePanel::Editor;
+                                                            }
+                                                            vec![]
+                                                        }
+                                                        'c' => vec![3], 
+                                                        'd' => vec![4], 
+                                                        'z' => vec![26], 
+                                                        _ => vec![c as u8] 
+                                                    }
+                                                } else {
+                                                     let mut b = [0; 4];
+                                                     c.encode_utf8(&mut b).as_bytes().to_vec()
+                                                }
+                                            },
+                                            KeyCode::Enter => vec![13], 
+                                            KeyCode::Backspace => vec![8], 
+                                            KeyCode::Left => vec![27, 91, 68],
+                                            KeyCode::Right => vec![27, 91, 67],
+                                            KeyCode::Up => vec![27, 91, 65],
+                                            KeyCode::Down => vec![27, 91, 66],
+                                            KeyCode::Esc => vec![27],
+                                            _ => vec![],
+                                        };
+
+                                        if !input_bytes.is_empty() {
+                                            let _ = app.pty_writer.write_all(&input_bytes);
+                                            let _ = app.pty_writer.flush();
                                         }
                                     }
                                 }
-                                _ => {}
                             }
                         }
-                        ActivePanel::Terminal => {
-                             match key.code {
-                                KeyCode::Enter => {
-                                    app.execute_command();
-                                }
-                                KeyCode::Backspace => {
-                                    app.terminal_input.pop();
-                                }
-                                KeyCode::Char(c) => {
-                                    app.terminal_input.push(c);
-                                }
-                                _ => {}
-                            }
-                        }
+                        _ => {}
                     }
                 }
             }
@@ -423,9 +524,15 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(List::new(items).block(file_tree_block), chunks[0]);
 
     // Editor & Terminal
+    let (editor_percent, terminal_percent) = if app.active_panel == ActivePanel::Terminal {
+        (40, 60)
+    } else {
+        (60, 40)
+    };
+
     let middle_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints([Constraint::Percentage(editor_percent), Constraint::Percentage(terminal_percent)])
         .split(chunks[1]);
 
     // Editor
@@ -446,14 +553,26 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(&editor, middle_chunks[0]);
 
     // Terminal
-    let mut terminal_items: Vec<ListItem> = app.terminal_logs.iter().rev().take(15).rev().map(|log| ListItem::new(log.as_str())).collect();
-    terminal_items.push(ListItem::new(format!("> {}", app.terminal_input)).style(Style::default().fg(Color::Cyan)));
-
     let terminal_block = Block::default()
         .title(" Terminal ")
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(Color::Yellow) } else { Style::default() });
-    f.render_widget(List::new(terminal_items).block(terminal_block), middle_chunks[1]);
+
+    // Render PTY
+    let screen = app.terminal_screen.read().unwrap();
+    let pseudo_term = PseudoTerminal::new(screen.screen())
+        .block(terminal_block);
+    f.render_widget(pseudo_term, middle_chunks[1]);
+    
+    // Render Scrollbar
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        middle_chunks[1],
+        &mut app.terminal_scroll_state.clone()
+    );
 
     // Chat
     let chat_chunks = Layout::default()
@@ -461,12 +580,20 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
         .split(chunks[2]);
 
-    let chat_history_items: Vec<ListItem> = app.chat_history.iter().map(|msg| ListItem::new(msg.as_str())).collect();
+    let chat_text = app.chat_history.join("\n\n");
     let chat_history_block = Block::default()
         .title(" AI Chat ")
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() });
-    f.render_widget(List::new(chat_history_items).block(chat_history_block), chat_chunks[0]);
+    
+    // We render a Paragraph with wrapping
+    // To enable scrolling in the future, we would need to track line count.
+    // For now, this ensures text fits horizontally.
+    let chat_paragraph = Paragraph::new(chat_text)
+        .block(chat_history_block)
+        .wrap(Wrap { trim: true });
+        
+    f.render_widget(chat_paragraph, chat_chunks[0]);
 
     let mut chat_input = app.chat_input.clone();
     chat_input.set_block(Block::default()
