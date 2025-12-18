@@ -1,13 +1,13 @@
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     crossterm::{
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind, MouseButton},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::{
@@ -22,6 +22,8 @@ use std::{
 use tui_textarea::{TextArea, CursorMove};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tui_term::widget::PseudoTerminal;
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::ThemeSet;
 
 #[derive(PartialEq)]
 enum ActivePanel {
@@ -127,6 +129,14 @@ struct App<'a> {
     terminal_scroll_state: ScrollbarState,
     history_buffer: Arc<RwLock<Vec<u8>>>,
     event_rx: mpsc::Receiver<AppEvent>,
+    
+    // Syntax Highlighting
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
+    
+    // Menus
+    menu_titles: Vec<String>,
+    menu_open_idx: Option<usize>,
 }
 
 impl<'a> App<'a> {
@@ -200,6 +210,10 @@ impl<'a> App<'a> {
                 let _ = tick_tx.send(AppEvent::Tick);
             }
         });
+        
+        // Syntect init
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
 
         let mut app = Self {
             file_tree: Vec::new(),
@@ -224,6 +238,12 @@ impl<'a> App<'a> {
             terminal_scroll_state: ScrollbarState::default(),
             history_buffer: history,
             event_rx: rx,
+            
+            syntax_set,
+            theme_set,
+            
+            menu_titles: vec![" File ".to_string(), " Edit ".to_string(), " View ".to_string(), " Help ".to_string()],
+            menu_open_idx: None,
         };
         
         app.file_tree_state.select(Some(0));
@@ -387,19 +407,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     loop {
         if app.should_quit {
-            return Ok(());
+            return Ok(())
         }
         
         // Update Scrollbar States
-        app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.selected_file_idx);
+        app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.file_tree_scroll_offset);
         app.editor_scroll_state = app.editor_scroll_state.content_length(app.editor.lines().len()).position(app.editor.cursor().0);
-        let chat_lines = app.chat_history.join("\n\n").lines().count(); 
+        let chat_lines = app.chat_history.join("\n").lines().count(); 
         app.chat_scroll_state = app.chat_scroll_state.content_length(chat_lines).position(app.chat_scroll as usize);
         
         terminal.draw(|f| ui(f, app))?;
 
-        // Wait for event
-        if let Ok(event) = app.event_rx.recv() {
+        // Wait for at least one event
+        let first_event = match app.event_rx.recv() {
+            Ok(e) => e,
+            Err(_) => return Ok(()),
+        };
+        
+        let mut events = vec![first_event];
+        // Drain pending events (limit to 50)
+        while let Ok(e) = app.event_rx.try_recv() {
+            events.push(e);
+            if events.len() > 50 { break; }
+        }
+
+        for event in events {
             match event {
                 AppEvent::PtyData => {
                     if let Ok(screen) = app.terminal_screen.read() {
@@ -412,13 +444,47 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                 },
                 AppEvent::Tick => {}, // No-op for tick events
                 AppEvent::Input(input) => {
+                    // Menu Key Handling
+                    if let Event::Key(key) = input {
+                        if key.code == KeyCode::Esc && app.menu_open_idx.is_some() {
+                            app.menu_open_idx = None;
+                            continue;
+                        }
+                    }
+                    
+                    // Menu Mouse Handling
+                    if let Event::Mouse(mouse) = input {
+                        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                            if mouse.row == 0 {
+                                let idx = (mouse.column / 10) as usize;
+                                if idx < app.menu_titles.len() {
+                                    app.menu_open_idx = Some(idx);
+                                } else {
+                                    app.menu_open_idx = None;
+                                }
+                                continue;
+                            } else if let Some(idx) = app.menu_open_idx {
+                                let menu_x = (idx * 10) as u16;
+                                if mouse.column >= menu_x && mouse.column < menu_x + 15 && mouse.row >= 1 && mouse.row < 6 {
+                                     match idx {
+                                         0 => { if mouse.row == 2 { app.should_quit = true; } }, // File -> Exit
+                                         2 => { if mouse.row == 2 { app.active_panel = ActivePanel::Editor; } }, // View -> Reset
+                                         _ => {}
+                                     }
+                                }
+                                app.menu_open_idx = None;
+                                continue;
+                            }
+                        }
+                    }
+
                     match input {
                         Event::Mouse(mouse) => {
                             match app.active_panel {
                                 ActivePanel::Terminal => {
                                      let input_bytes = match mouse.kind {
-                                        event::MouseEventKind::ScrollDown => vec![27, 91, 66], 
-                                        event::MouseEventKind::ScrollUp => vec![27, 91, 65],   
+                                        MouseEventKind::ScrollDown => vec![27, 91, 66], 
+                                        MouseEventKind::ScrollUp => vec![27, 91, 65],   
                                         _ => vec![],
                                     };
                                     if !input_bytes.is_empty() {
@@ -428,12 +494,12 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 },
                                 ActivePanel::FileTree => {
                                     match mouse.kind {
-                                        event::MouseEventKind::ScrollDown => {
+                                        MouseEventKind::ScrollDown => {
                                             if app.file_tree_scroll_offset < app.visible_items.len().saturating_sub(1) {
                                                 app.file_tree_scroll_offset += 1;
                                             }
                                         },
-                                        event::MouseEventKind::ScrollUp => {
+                                        MouseEventKind::ScrollUp => {
                                             if app.file_tree_scroll_offset > 0 {
                                                 app.file_tree_scroll_offset -= 1;
                                             }
@@ -443,24 +509,24 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 },
                                 ActivePanel::Editor => {
                                      match mouse.kind {
-                                        event::MouseEventKind::ScrollDown => {
+                                        MouseEventKind::ScrollDown => {
                                             app.editor.move_cursor(CursorMove::Down);
                                         },
-                                        event::MouseEventKind::ScrollUp => {
+                                        MouseEventKind::ScrollUp => {
                                             app.editor.move_cursor(CursorMove::Up);
                                         },
-                                        _ => {} // Ignore other mouse events for now
+                                        _ => {}
                                     }
                                 },
                                 ActivePanel::Chat => {
                                     match mouse.kind {
-                                        event::MouseEventKind::ScrollDown => {
+                                        MouseEventKind::ScrollDown => {
                                             app.chat_scroll = app.chat_scroll.saturating_add(1);
                                         },
-                                        event::MouseEventKind::ScrollUp => {
+                                        MouseEventKind::ScrollUp => {
                                             app.chat_scroll = app.chat_scroll.saturating_sub(1);
                                         },
-                                        _ => {} // Ignore other mouse events for now
+                                        _ => {}
                                     }
                                 }
                             }
@@ -600,6 +666,37 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(f.area());
+
+    // --- Menu Bar ---
+    let menu_bar_area = main_chunks[0];
+    let menu_titles_count = app.menu_titles.len();
+    let menu_constraints = std::iter::repeat(Constraint::Length(10))
+        .take(menu_titles_count)
+        .chain(std::iter::once(Constraint::Min(0)))
+        .collect::<Vec<_>>();
+    
+    let menu_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(menu_constraints)
+        .split(menu_bar_area);
+        
+    for (i, title) in app.menu_titles.iter().enumerate() {
+        let style = if app.menu_open_idx == Some(i) {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        f.render_widget(Paragraph::new(title.as_str()).style(style), menu_chunks[i]);
+    }
+    
+    // --- Main App ---
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -607,12 +704,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             Constraint::Percentage(60),
             Constraint::Percentage(20),
         ])
-        .split(f.area());
+        .split(main_chunks[1]);
 
     // File Tree
     let height = chunks[0].height as usize;
-    // Adjust scroll offset if selection moves out of view (keyboard nav)
-    // This logic should ideally be in update loop, but here is okay for simple sync
     if app.selected_file_idx < app.file_tree_scroll_offset {
         app.file_tree_scroll_offset = app.selected_file_idx;
     } else if app.selected_file_idx >= app.file_tree_scroll_offset + height {
@@ -648,15 +743,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(Color::Yellow) } else { Style::default() });
     
-    // We are manually handling selection style above, so we pass None to state to avoid double styling/confusion
-    // or we can rely on manual styling entirely and just use state for nothing?
-    // Ratatui List highlights item at state.selected().
-    // If we manually styled it, we can set state.select(None).
     app.file_tree_state.select(None);
     
     f.render_stateful_widget(List::new(items).block(file_tree_block), chunks[0], &mut app.file_tree_state);
-    
-    app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.file_tree_scroll_offset);
     
     f.render_stateful_widget(
         Scrollbar::default()
@@ -764,4 +853,25 @@ fn ui(f: &mut Frame, app: &mut App) {
         .title(" Chat Input ")
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() }));
     f.render_widget(&chat_input, chat_chunks[1]);
+
+    // --- Menu Dropdown Overlay ---
+    if let Some(idx) = app.menu_open_idx {
+        let menu_x = (idx * 10) as u16;
+        let menu_items = match idx {
+            0 => vec![ListItem::new(" Exit ")],
+            1 => vec![ListItem::new(" Copy "), ListItem::new(" Paste ")],
+            2 => vec![ListItem::new(" Reset Layout ")],
+            3 => vec![ListItem::new(" About ")],
+            _ => vec![],
+        };
+        
+        let height = (menu_items.len() + 2) as u16;
+        let area = Rect::new(menu_x, 1, 15, height);
+        f.render_widget(Clear, area);
+        f.render_widget(
+            List::new(menu_items)
+                .block(Block::default().borders(Borders::ALL)),
+            area
+        );
+    }
 }
