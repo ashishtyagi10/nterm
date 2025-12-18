@@ -1,0 +1,220 @@
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    Frame,
+};
+use tui_term::widget::PseudoTerminal;
+
+use crate::app::{App, ActivePanel};
+
+pub fn ui(f: &mut Frame, app: &mut App) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(f.area());
+
+    // --- Menu Bar ---
+    let menu_bar_area = main_chunks[0];
+    let menu_titles_count = app.menu_titles.len();
+    let menu_constraints = std::iter::repeat(Constraint::Length(10))
+        .take(menu_titles_count)
+        .chain(std::iter::once(Constraint::Min(0)))
+        .collect::<Vec<_>>();
+    
+    let menu_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(menu_constraints)
+        .split(menu_bar_area);
+        
+    for (i, title) in app.menu_titles.iter().enumerate() {
+        let style = if app.menu_open_idx == Some(i) {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        f.render_widget(Paragraph::new(title.as_str()).style(style), menu_chunks[i]);
+    }
+    
+    // --- Main App ---
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(main_chunks[1]);
+
+    // File Tree
+    let height = chunks[0].height as usize;
+    if app.selected_file_idx < app.file_tree_scroll_offset {
+        app.file_tree_scroll_offset = app.selected_file_idx;
+    } else if app.selected_file_idx >= app.file_tree_scroll_offset + height {
+        app.file_tree_scroll_offset = app.selected_file_idx - height + 1;
+    }
+
+    let items: Vec<ListItem> = app.visible_items.iter()
+        .skip(app.file_tree_scroll_offset)
+        .take(height)
+        .enumerate()
+        .map(|(i, item)| {
+            let actual_idx = app.file_tree_scroll_offset + i;
+            let style = if actual_idx == app.selected_file_idx {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else {
+                Style::default()
+            };
+            
+            let prefix = if item.is_dir {
+                if item.expanded { "v " } else { "+ " }
+            } else {
+                "- "
+            };
+            
+            let indent = "  ".repeat(item.depth);
+            let content = format!("{}{}{}", indent, prefix, item.name);
+            
+            ListItem::new(content).style(style)
+        }).collect();
+    
+    let file_tree_block = Block::default()
+        .title(" File Tree ")
+        .borders(Borders::ALL)
+        .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(Color::Yellow) } else { Style::default() });
+    
+    app.file_tree_state.select(None);
+    
+    f.render_stateful_widget(List::new(items).block(file_tree_block), chunks[0], &mut app.file_tree_state);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        chunks[0],
+        &mut app.file_tree_scroll_state
+    );
+
+    // Editor & Terminal
+    let (editor_percent, terminal_percent) = if app.active_panel == ActivePanel::Terminal {
+        (40, 60)
+    } else {
+        (60, 40)
+    };
+
+    let middle_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(editor_percent), Constraint::Percentage(terminal_percent)])
+        .split(chunks[1]);
+
+    // Editor
+    let mut editor = app.editor.clone();
+    let editor_title = if let Some(item) = app.visible_items.get(app.selected_file_idx) {
+        if !item.is_dir {
+             format!(" Editor - {} ", item.name) 
+        } else {
+            " Editor ".to_string()
+        }
+    } else {
+        " Editor ".to_string()
+    };
+    editor.set_block(Block::default()
+        .borders(Borders::ALL)
+        .title(editor_title)
+        .border_style(if app.active_panel == ActivePanel::Editor { Style::default().fg(Color::Yellow) } else { Style::default() }));
+    f.render_widget(&editor, middle_chunks[0]);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        middle_chunks[0],
+        &mut app.editor_scroll_state
+    );
+
+    // Terminal
+    let terminal_block = Block::default()
+        .title(" Terminal ")
+        .borders(Borders::ALL)
+        .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(Color::Yellow) } else { Style::default() });
+
+    let screen = app.terminal_screen.read().unwrap();
+    let pseudo_term = PseudoTerminal::new(screen.screen())
+        .block(terminal_block);
+    f.render_widget(pseudo_term, middle_chunks[1]);
+    
+    let terminal_scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("▲"))
+        .end_symbol(Some("▼"));
+    
+    let mut terminal_scroll_state = app.terminal_scroll_state
+        .viewport_content_length(middle_chunks[1].height as usize);
+        
+    f.render_stateful_widget(
+        terminal_scrollbar,
+        middle_chunks[1],
+        &mut terminal_scroll_state
+    );
+
+    // Chat
+    let chat_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .split(chunks[2]);
+
+    let chat_text = app.chat_history.join("\n\n");
+    let chat_history_block = Block::default()
+        .title(" AI Chat ")
+        .borders(Borders::ALL)
+        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() });
+    
+    let chat_paragraph = Paragraph::new(chat_text)
+        .block(chat_history_block)
+        .wrap(Wrap { trim: true })
+        .scroll((app.chat_scroll, 0));
+        
+    f.render_widget(chat_paragraph, chat_chunks[0]);
+    
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        chat_chunks[0],
+        &mut app.chat_scroll_state
+    );
+
+    let mut chat_input = app.chat_input.clone();
+    chat_input.set_block(Block::default()
+        .borders(Borders::ALL)
+        .title(" Chat Input ")
+        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() }));
+    f.render_widget(&chat_input, chat_chunks[1]);
+
+    // --- Menu Dropdown Overlay ---
+    if let Some(idx) = app.menu_open_idx {
+        let menu_x = (idx * 10) as u16;
+        let menu_items = match idx {
+            0 => vec![ListItem::new(" Exit (Ctrl+Q) ")],
+            1 => vec![ListItem::new(" Copy (Ctrl+C) "), ListItem::new(" Paste (Ctrl+V) ")],
+            2 => vec![ListItem::new(" Reset Layout (Ctrl+R) ")],
+            3 => vec![ListItem::new(" About ")],
+            _ => vec![],
+        };
+        
+        let height = (menu_items.len() + 2) as u16;
+        let area = Rect::new(menu_x, 1, 20, height);
+        f.render_widget(Clear, area);
+        f.render_widget(
+            List::new(menu_items)
+                .block(Block::default().borders(Borders::ALL)),
+            area
+        );
+    }
+}
