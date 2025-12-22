@@ -2,11 +2,14 @@ mod action;
 mod file_tree;
 mod app;
 mod ui;
+mod ai;
+mod config;
+mod editor;
 
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     crossterm::{
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind, MouseButton},
+        event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind, MouseButton},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
@@ -14,13 +17,13 @@ use ratatui::{
 };
 use std::error::Error;
 use std::io;
-use tui_textarea::CursorMove;
 use tui_textarea::TextArea;
-use ratatui::widgets::{Block, Borders}; // Needed for DumpHistory
+use ratatui::widgets::{Block, Borders};
 
 use crate::app::{App, AppEvent, ActivePanel};
 use crate::action::Action;
-use crate::ui::ui;
+use crate::ui::{ui, get_layout_chunks};
+use ratatui::layout::Rect;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -59,7 +62,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
         
         // Update Scrollbar States
         app.file_tree_scroll_state = app.file_tree_scroll_state.content_length(app.visible_items.len()).position(app.file_tree_scroll_offset);
-        app.editor_scroll_state = app.editor_scroll_state.content_length(app.editor.lines().len()).position(app.editor.cursor().0);
+        app.editor_scroll_state = app.editor_scroll_state.content_length(app.editor_state.line_count()).position(app.editor_state.scroll_offset);
         let chat_lines = app.chat_history.join("\n").lines().count(); 
         app.chat_scroll_state = app.chat_scroll_state.content_length(chat_lines).position(app.chat_scroll as usize);
         
@@ -89,9 +92,39 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                             .position(scrollback as usize);
                     }
                 },
+                AppEvent::AiResponse(response) => {
+                    app.chat_history.push(format!("AI: {}", response));
+                },
                 AppEvent::Tick => {}, // No-op for tick events
                 AppEvent::Input(input) => {
                     if let Event::Key(key) = input {
+                        // Settings Mode Handling
+                        if app.show_settings {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.show_settings = false;
+                                    // Reset input to current config value on cancel
+                                    app.settings_input = TextArea::default();
+                                    app.settings_input.set_block(Block::default().borders(Borders::ALL).title(" Gemini API Key "));
+                                    if let Some(key) = &app.config.gemini_api_key {
+                                        app.settings_input.insert_str(key);
+                                    }
+                                },
+                                KeyCode::Enter => {
+                                    let key = app.settings_input.lines()[0].trim().to_string();
+                                    if !key.is_empty() {
+                                        app.config.gemini_api_key = Some(key);
+                                        let _ = app.config.save();
+                                    }
+                                    app.show_settings = false;
+                                },
+                                _ => {
+                                    app.settings_input.input(key);
+                                }
+                            }
+                            continue;
+                        }
+
                         // Search Mode Handling
                         if app.is_searching {
                             match key.code {
@@ -149,10 +182,12 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 Action::ResetLayout => app.active_panel = ActivePanel::Editor,
                                 Action::DumpHistory => {
                                     if let Ok(buffer) = app.history_buffer.read() {
-                                        let clean_content = String::from_utf8_lossy(&buffer).to_string(); 
+                                        let clean_content = String::from_utf8_lossy(&buffer).to_string();
                                         let lines: Vec<String> = clean_content.lines().map(|s| s.to_string()).collect();
-                                        app.editor = TextArea::from(lines);
-                                        app.editor.set_block(Block::default().borders(Borders::ALL).title(" Editor - Terminal History "));
+                                        app.editor_state.lines = if lines.is_empty() { vec![String::new()] } else { lines };
+                                        app.editor_state.cursor_row = 0;
+                                        app.editor_state.cursor_col = 0;
+                                        app.editor_state.file_path = None;
                                         app.active_panel = ActivePanel::Editor;
                                     }
                                 },
@@ -163,6 +198,12 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                         // app.search_input = TextArea::default(); // Optional: Clear on open
                                         app.on_search_input(); // Refresh
                                     }
+                                },
+                                Action::CycleModel => {
+                                    app.cycle_model();
+                                },
+                                Action::OpenSettings => {
+                                    app.show_settings = true;
                                 },
                                 _ => {}
                             }
@@ -202,6 +243,34 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                         }
                     }
 
+                    // Global Focus Switching via Mouse
+                    if let Event::Mouse(mouse) = input {
+                        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                             if let Ok(size) = terminal.size() {
+                                 let rect = Rect { x: 0, y: 0, width: size.width, height: size.height };
+                                 let layout = get_layout_chunks(rect, &app.active_panel);
+                                 let col = mouse.column;
+                                 let row = mouse.row;
+                                 
+                                 if col >= layout.file_tree.x && col < layout.file_tree.x + layout.file_tree.width &&
+                                    row >= layout.file_tree.y && row < layout.file_tree.y + layout.file_tree.height {
+                                     app.active_panel = ActivePanel::FileTree;
+                                 } else if col >= layout.editor.x && col < layout.editor.x + layout.editor.width &&
+                                    row >= layout.editor.y && row < layout.editor.y + layout.editor.height {
+                                     app.active_panel = ActivePanel::Editor;
+                                 } else if col >= layout.terminal.x && col < layout.terminal.x + layout.terminal.width &&
+                                    row >= layout.terminal.y && row < layout.terminal.y + layout.terminal.height {
+                                     app.active_panel = ActivePanel::Terminal;
+                                 } else if (col >= layout.chat_history.x && col < layout.chat_history.x + layout.chat_history.width &&
+                                            row >= layout.chat_history.y && row < layout.chat_history.y + layout.chat_history.height) ||
+                                           (col >= layout.chat_input.x && col < layout.chat_input.x + layout.chat_input.width &&
+                                            row >= layout.chat_input.y && row < layout.chat_input.y + layout.chat_input.height) {
+                                     app.active_panel = ActivePanel::Chat;
+                                 }
+                             }
+                        }
+                    }
+
                     match input {
                         Event::Mouse(mouse) => {
                             match app.active_panel {
@@ -219,14 +288,11 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 ActivePanel::FileTree => {
                                     match mouse.kind {
                                         MouseEventKind::ScrollDown => {
-                                            if app.file_tree_scroll_offset < app.visible_items.len().saturating_sub(1) {
-                                                app.file_tree_scroll_offset += 1;
-                                            }
+                                            let max_scroll = app.visible_items.len().saturating_sub(1);
+                                            app.file_tree_scroll_offset = (app.file_tree_scroll_offset + 3).min(max_scroll);
                                         },
                                         MouseEventKind::ScrollUp => {
-                                            if app.file_tree_scroll_offset > 0 {
-                                                app.file_tree_scroll_offset -= 1;
-                                            }
+                                            app.file_tree_scroll_offset = app.file_tree_scroll_offset.saturating_sub(3);
                                         },
                                         _ => {} // Other mouse events
                                     }
@@ -234,10 +300,10 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 ActivePanel::Editor => {
                                      match mouse.kind {
                                         MouseEventKind::ScrollDown => {
-                                            app.editor.move_cursor(CursorMove::Down);
+                                            app.editor_state.scroll_down(3);
                                         },
                                         MouseEventKind::ScrollUp => {
-                                            app.editor.move_cursor(CursorMove::Up);
+                                            app.editor_state.scroll_up(3);
                                         },
                                         _ => {} // Other mouse events
                                     }
@@ -245,10 +311,10 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 ActivePanel::Chat => {
                                     match mouse.kind {
                                         MouseEventKind::ScrollDown => {
-                                            app.chat_scroll = app.chat_scroll.saturating_add(1);
+                                            app.chat_scroll = app.chat_scroll.saturating_add(3);
                                         },
                                         MouseEventKind::ScrollUp => {
-                                            app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                            app.chat_scroll = app.chat_scroll.saturating_sub(3);
                                         },
                                         _ => {} // Other mouse events
                                     }
@@ -275,23 +341,79 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
 
                             match app.active_panel {
                                     ActivePanel::Editor => {
-                                        app.editor.input(key);
+                                        match key.code {
+                                            KeyCode::Char(c) => {
+                                                app.editor_state.insert_char(c);
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.editor_state.backspace();
+                                            }
+                                            KeyCode::Delete => {
+                                                app.editor_state.delete();
+                                            }
+                                            KeyCode::Enter => {
+                                                app.editor_state.insert_newline();
+                                            }
+                                            KeyCode::Up => {
+                                                app.editor_state.move_cursor_up();
+                                            }
+                                            KeyCode::Down => {
+                                                app.editor_state.move_cursor_down();
+                                            }
+                                            KeyCode::Left => {
+                                                app.editor_state.move_cursor_left();
+                                            }
+                                            KeyCode::Right => {
+                                                app.editor_state.move_cursor_right();
+                                            }
+                                            KeyCode::Home => {
+                                                app.editor_state.move_cursor_home();
+                                            }
+                                            KeyCode::End => {
+                                                app.editor_state.move_cursor_end();
+                                            }
+                                            KeyCode::PageUp => {
+                                                app.editor_state.page_up(20);
+                                            }
+                                            KeyCode::PageDown => {
+                                                app.editor_state.page_down(20);
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                     ActivePanel::Chat => {
-                                        if key.code == KeyCode::Enter {
-                                            let content = app.chat_input.lines()[0].clone();
-                                            if !content.is_empty() {
-                                                app.chat_history.push(format!("You: {}", content));
-                                                app.chat_input = TextArea::default();
-                                                app.chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
-                                                app.chat_history.push("AI: I see you're working on this project. How can I help with the code?".to_string());
+                                        match key.code {
+                                            KeyCode::Enter => {
+                                                let content = app.chat_input.lines()[0].clone();
+                                                if !content.is_empty() {
+                                                    app.send_chat_message(content);
+                                                    app.chat_input = TextArea::default();
+                                                    app.chat_input.set_block(Block::default().borders(Borders::ALL).title(" Chat Input "));
+                                                    // Auto-scroll to bottom on new message
+                                                    app.chat_scroll = u16::MAX;
+                                                }
                                             }
-                                        } else if key.code == KeyCode::Up {
-                                            app.chat_scroll = app.chat_scroll.saturating_sub(1);
-                                        } else if key.code == KeyCode::Down {
-                                            app.chat_scroll = app.chat_scroll.saturating_add(1);
-                                        } else {
-                                            app.chat_input.input(key);
+                                            KeyCode::Up => {
+                                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                            }
+                                            KeyCode::Down => {
+                                                app.chat_scroll = app.chat_scroll.saturating_add(1);
+                                            }
+                                            KeyCode::PageUp => {
+                                                app.chat_scroll = app.chat_scroll.saturating_sub(10);
+                                            }
+                                            KeyCode::PageDown => {
+                                                app.chat_scroll = app.chat_scroll.saturating_add(10);
+                                            }
+                                            KeyCode::Home => {
+                                                app.chat_scroll = 0;
+                                            }
+                                            KeyCode::End => {
+                                                app.chat_scroll = u16::MAX; // Will be clamped in render
+                                            }
+                                            _ => {
+                                                app.chat_input.input(key);
+                                            }
                                         }
                                     }
                                     ActivePanel::FileTree => {
@@ -309,6 +431,17 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                                     app.file_tree_state.select(Some(app.selected_file_idx));
                                                     app.load_selected_file();
                                                 }
+                                            }
+                                            KeyCode::PageUp => {
+                                                let jump = 10;
+                                                app.selected_file_idx = app.selected_file_idx.saturating_sub(jump);
+                                                app.file_tree_state.select(Some(app.selected_file_idx));
+                                            }
+                                            KeyCode::PageDown => {
+                                                let jump = 10;
+                                                let max_idx = app.visible_items.len().saturating_sub(1);
+                                                app.selected_file_idx = (app.selected_file_idx + jump).min(max_idx);
+                                                app.file_tree_state.select(Some(app.selected_file_idx));
                                             }
                                             KeyCode::Right => {
                                                 if let Some(item) = app.visible_items.get(app.selected_file_idx) {
@@ -353,9 +486,9 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                             KeyCode::Char(c) => {
                                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                                     match c {
-                                                        'c' => vec![3], 
-                                                        'd' => vec![4], 
-                                                        'z' => vec![26], 
+                                                        'c' => vec![3],
+                                                        'd' => vec![4],
+                                                        'z' => vec![26],
                                                         c => vec![(c as u8) & 0x1f],
                                                     }
                                                 } else {
@@ -363,12 +496,16 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                                      c.encode_utf8(&mut b).as_bytes().to_vec()
                                                 }
                                             },
-                                            KeyCode::Enter => vec![13], 
-                                            KeyCode::Backspace => vec![8], 
+                                            KeyCode::Enter => vec![13],
+                                            KeyCode::Backspace => vec![8],
                                             KeyCode::Left => vec![27, 91, 68],
                                             KeyCode::Right => vec![27, 91, 67],
                                             KeyCode::Up => vec![27, 91, 65],
                                             KeyCode::Down => vec![27, 91, 66],
+                                            KeyCode::PageUp => vec![27, 91, 53, 126], // ESC [5~
+                                            KeyCode::PageDown => vec![27, 91, 54, 126], // ESC [6~
+                                            KeyCode::Home => vec![27, 91, 72], // ESC [H
+                                            KeyCode::End => vec![27, 91, 70], // ESC [F
                                             KeyCode::Esc => vec![27],
                                             _ => vec![],
                                         };

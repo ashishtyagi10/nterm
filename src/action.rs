@@ -11,5 +11,7 @@ pub enum Action {
     CollapseDir,
     Open,
     FileSearch,
+    CycleModel,
+    OpenSettings,
     None,
 }

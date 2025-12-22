@@ -7,18 +7,76 @@ use ratatui::{
 use tui_term::widget::PseudoTerminal;
 
 use crate::app::{App, ActivePanel};
+use crate::editor::EditorWidget;
 
-pub fn ui(f: &mut Frame, app: &mut App) {
+pub struct AppLayout {
+    pub menu: Rect,
+    pub file_tree: Rect,
+    pub editor: Rect,
+    pub terminal: Rect,
+    pub chat_history: Rect,
+    pub chat_input: Rect,
+}
+
+pub fn get_layout_chunks(area: Rect, active_panel: &ActivePanel) -> AppLayout {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(0),
         ])
-        .split(f.area());
+        .split(area);
+
+    let menu = main_chunks[0];
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(main_chunks[1]);
+        
+    let file_tree = chunks[0];
+
+    let (editor_percent, terminal_percent) = if *active_panel == ActivePanel::Terminal {
+        (40, 60)
+    } else {
+        (60, 40)
+    };
+
+    let middle_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(editor_percent), Constraint::Percentage(terminal_percent)])
+        .split(chunks[1]);
+        
+    let editor = middle_chunks[0];
+    let terminal = middle_chunks[1];
+
+    let chat_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+        .split(chunks[2]);
+        
+    let chat_history = chat_chunks[0];
+    let chat_input = chat_chunks[1];
+
+    AppLayout {
+        menu,
+        file_tree,
+        editor,
+        terminal,
+        chat_history,
+        chat_input,
+    }
+}
+
+pub fn ui(f: &mut Frame, app: &mut App) {
+    let layout = get_layout_chunks(f.area(), &app.active_panel);
 
     // --- Menu Bar ---
-    let menu_bar_area = main_chunks[0];
+    let menu_bar_area = layout.menu;
     let menu_titles_count = app.menu_titles.len();
     let menu_constraints = std::iter::repeat(Constraint::Length(10))
         .take(menu_titles_count)
@@ -38,19 +96,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         };
         f.render_widget(Paragraph::new(title.as_str()).style(style), menu_chunks[i]);
     }
-    
-    // --- Main App ---
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
-        ])
-        .split(main_chunks[1]);
 
     // File Tree
-    let height = chunks[0].height as usize;
+    let height = layout.file_tree.height as usize;
     if app.selected_file_idx < app.file_tree_scroll_offset {
         app.file_tree_scroll_offset = app.selected_file_idx;
     } else if app.selected_file_idx >= app.file_tree_scroll_offset + height {
@@ -88,44 +136,45 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     
     app.file_tree_state.select(None);
     
-    f.render_stateful_widget(List::new(items).block(file_tree_block), chunks[0], &mut app.file_tree_state);
+    f.render_stateful_widget(List::new(items).block(file_tree_block), layout.file_tree, &mut app.file_tree_state);
     
     f.render_stateful_widget(
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼")),
-        chunks[0],
+        layout.file_tree,
         &mut app.file_tree_scroll_state
     );
 
-    // Editor & Terminal
-    let (editor_percent, terminal_percent) = if app.active_panel == ActivePanel::Terminal {
-        (40, 60)
-    } else {
-        (60, 40)
-    };
-
-    let middle_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(editor_percent), Constraint::Percentage(terminal_percent)])
-        .split(chunks[1]);
-
     // Editor
-    let mut editor = app.editor.clone();
-    // Update title dynamically if needed, but we set it on load.
-    // Ensure active style is applied.
-    let current_block = editor.block().cloned().unwrap_or_else(|| Block::default().borders(Borders::ALL));
-    editor.set_block(current_block.border_style(if app.active_panel == ActivePanel::Editor { Style::default().fg(Color::Yellow) } else { Style::default() }));
-    
-    f.render_widget(&editor, middle_chunks[0]);
-    
+    let editor_title = app.editor_state.file_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| format!(" Editor - {} ", n.to_string_lossy()))
+        .unwrap_or_else(|| " Editor ".to_string());
+
+    let editor_widget = EditorWidget::new()
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(editor_title)
+            .border_style(if app.active_panel == ActivePanel::Editor {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            }))
+        .line_number_style(Style::default().fg(Color::DarkGray))
+        .cursor_style(Style::default().bg(Color::White).fg(Color::Black))
+        .focused(app.active_panel == ActivePanel::Editor);
+
+    f.render_stateful_widget(editor_widget, layout.editor, &mut app.editor_state);
+
     f.render_stateful_widget(
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼")),
-        middle_chunks[0],
+        layout.editor,
         &mut app.editor_scroll_state
     );
 
@@ -138,7 +187,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let screen = app.terminal_screen.read().unwrap();
     let pseudo_term = PseudoTerminal::new(screen.screen())
         .block(terminal_block);
-    f.render_widget(pseudo_term, middle_chunks[1]);
+    f.render_widget(pseudo_term, layout.terminal);
     
     let terminal_scrollbar = Scrollbar::default()
         .orientation(ScrollbarOrientation::VerticalRight)
@@ -146,39 +195,40 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         .end_symbol(Some("▼"));
     
     let mut terminal_scroll_state = app.terminal_scroll_state
-        .viewport_content_length(middle_chunks[1].height as usize);
+        .viewport_content_length(layout.terminal.height as usize);
         
     f.render_stateful_widget(
         terminal_scrollbar,
-        middle_chunks[1],
+        layout.terminal,
         &mut terminal_scroll_state
     );
 
     // Chat
-    let chat_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
-        .split(chunks[2]);
-
     let chat_text = app.chat_history.join("\n\n");
     let chat_history_block = Block::default()
-        .title(" AI Chat ")
+        .title(format!(" AI Chat ({}) (Ctrl+M to Switch) ", app.selected_model))
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() });
-    
+
+    // Calculate max scroll based on content height
+    let chat_inner_height = layout.chat_history.height.saturating_sub(2) as usize; // Subtract borders
+    let total_lines = chat_text.lines().count();
+    let max_scroll = total_lines.saturating_sub(chat_inner_height) as u16;
+    app.chat_scroll = app.chat_scroll.min(max_scroll);
+
     let chat_paragraph = Paragraph::new(chat_text)
         .block(chat_history_block)
         .wrap(Wrap { trim: true })
         .scroll((app.chat_scroll, 0));
-        
-    f.render_widget(chat_paragraph, chat_chunks[0]);
+
+    f.render_widget(chat_paragraph, layout.chat_history);
     
     f.render_stateful_widget(
         Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼")),
-        chat_chunks[0],
+        layout.chat_history,
         &mut app.chat_scroll_state
     );
 
@@ -187,7 +237,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .title(" Chat Input ")
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() }));
-    f.render_widget(&chat_input, chat_chunks[1]);
+    f.render_widget(&chat_input, layout.chat_input);
 
     // --- Menu Dropdown Overlay ---
     if let Some(idx) = app.menu_open_idx {
@@ -237,6 +287,20 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
             
         f.render_stateful_widget(list, chunks[1], &mut app.search_state);
+    }
+
+    // --- Settings Modal ---
+    if app.show_settings {
+        let area = centered_rect(60, 20, f.area());
+        f.render_widget(Clear, area);
+        
+        let block = Block::default()
+            .title(" Settings - Gemini API Key (Enter to Save, Esc to Cancel) ")
+            .borders(Borders::ALL);
+            
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(&app.settings_input, inner_area);
     }
 }
 
