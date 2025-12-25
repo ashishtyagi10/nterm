@@ -72,10 +72,13 @@ struct GeminiError {
 }
 
 async fn send_gemini_message(input: &str, api_key: &str) -> Result<String, String> {
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={}", api_key);
-    
-    let client = Client::new();
-    
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}", api_key);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
     let request_body = GeminiRequest {
         contents: vec![GeminiContent {
             role: "user".to_string(),
@@ -84,19 +87,25 @@ async fn send_gemini_message(input: &str, api_key: &str) -> Result<String, Strin
     };
 
     let response = client.post(&url)
+        .header("Content-Type", "application/json")
         .json(&request_body)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-        
-    if !response.status().is_success() {
-         return Err(format!("API Request failed: {}", response.status()));
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("API error ({}): {}", status, error_text));
     }
 
-    let gemini_resp: GeminiResponse = response.json().await.map_err(|e| e.to_string())?;
-    
+    let response_text = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+
+    let gemini_resp: GeminiResponse = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse response: {} - Body: {}", e, &response_text[..response_text.len().min(200)]))?;
+
     if let Some(error) = gemini_resp.error {
-        return Err(error.message);
+        return Err(format!("Gemini API error: {}", error.message));
     }
 
     if let Some(candidates) = gemini_resp.candidates {
@@ -106,6 +115,6 @@ async fn send_gemini_message(input: &str, api_key: &str) -> Result<String, Strin
             }
         }
     }
-    
-    Err("No response content found".to_string())
+
+    Err("No response content found in Gemini response".to_string())
 }

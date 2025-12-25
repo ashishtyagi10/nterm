@@ -139,6 +139,8 @@ pub struct App<'a> {
 
     pub menu_open_idx: Option<usize>,
 
+    pub menu_hover_idx: Option<usize>,
+
     pub key_map: HashMap<(KeyCode, KeyModifiers), Action>,
 
     pub current_theme: Theme,
@@ -422,6 +424,8 @@ impl<'a> App<'a> {
 
             menu_open_idx: None,
 
+            menu_hover_idx: None,
+
             key_map,
 
             current_theme: Theme::new(theme_mode),
@@ -531,33 +535,64 @@ impl<'a> App<'a> {
         self.current_theme = Theme::new(self.config.theme);
         let _ = self.config.save();
 
-        // Send OSC escape codes to update terminal default colors
-        let (fg, bg) = match self.config.theme {
-            crate::theme::ThemeMode::Light => ("#000000", "#FFFFFF"),
-            crate::theme::ThemeMode::Dark => ("#FFFFFF", "#000000"),
-        };
-        // OSC 10: Set default foreground, OSC 11: Set default background
-        let payload = format!("\x1b]10;{}\x07\x1b]11;{}\x07", fg, bg);
-        let _ = self.pty_writer.write_all(payload.as_bytes());
+        // Reset the vt100 parser to apply new default colors
+        if let Ok(mut parser) = self.terminal_screen.write() {
+            let (rows, cols) = {
+                let size = parser.screen().size();
+                (size.0, size.1)
+            };
+            // Create new parser with same dimensions - this resets colors
+            *parser = tui_term::vt100::Parser::new(rows, cols, 0);
+        }
+
+        // Send escape codes to reset terminal and re-run prompt
+        // \x1b[0m - Reset all attributes
+        // \x1b[2J - Clear screen
+        // \x1b[H - Move cursor to home
+        let reset_seq = "\x1b[0m\x1b[2J\x1b[H";
+        let _ = self.pty_writer.write_all(reset_seq.as_bytes());
         let _ = self.pty_writer.flush();
     }
 
     pub fn send_chat_message(&mut self, content: String) {
         self.chat_history.push(format!("You: {}", content));
-        
+
         let tx = self.event_tx.clone();
         let model = self.selected_model.clone();
         let history = self.chat_history.clone();
         let api_key = self.config.gemini_api_key.clone();
-        
+
         tokio::spawn(async move {
             let response = match send_message(model, &history, &content, api_key).await {
                 Ok(resp) => resp,
                 Err(e) => format!("Error: {}", e),
             };
-            
+
             let _ = tx.send(AppEvent::AiResponse(response));
         });
+    }
+
+    /// Returns the menu items for a given menu index
+    pub fn get_menu_items(idx: usize) -> Vec<(&'static str, Action)> {
+        match idx {
+            0 => vec![
+                ("Settings", Action::OpenSettings),
+                ("File Search", Action::FileSearch),
+                ("Exit", Action::Quit),
+            ],
+            1 => vec![
+                ("Copy", Action::Copy),
+                ("Paste", Action::Paste),
+            ],
+            2 => vec![
+                ("Reset Layout", Action::ResetLayout),
+                ("Dump History", Action::DumpHistory),
+            ],
+            3 => vec![
+                ("About", Action::About),
+            ],
+            _ => vec![],
+        }
     }
 
 }

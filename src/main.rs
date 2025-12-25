@@ -287,72 +287,129 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                     
                     // Menu Mouse Handling
                     if let Event::Mouse(mouse) = input {
+                        // Handle hover when menu is open
+                        if let Some(idx) = app.menu_open_idx {
+                            let menu_x = (idx * 10) as u16;
+                            let menu_items = App::get_menu_items(idx);
+                            let menu_width = 24u16;
+                            let menu_height = menu_items.len() as u16 + 2; // +2 for borders
+
+                            // Check if mouse is within menu dropdown area
+                            if mouse.column >= menu_x
+                                && mouse.column < menu_x + menu_width
+                                && mouse.row >= 1
+                                && mouse.row < 1 + menu_height
+                            {
+                                // Calculate which item is hovered (row 1 is border, items start at row 2)
+                                let item_row = mouse.row.saturating_sub(2);
+                                if (item_row as usize) < menu_items.len() {
+                                    app.menu_hover_idx = Some(item_row as usize);
+                                } else {
+                                    app.menu_hover_idx = None;
+                                }
+                            } else if mouse.row != 0 {
+                                // Mouse outside menu and not on menu bar - could close on move
+                                app.menu_hover_idx = None;
+                            }
+                        }
+
                         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                             if mouse.row == 0 {
+                                // Click on menu bar
                                 let idx = (mouse.column / 10) as usize;
                                 if idx < app.menu_titles.len() {
-                                    app.menu_open_idx = Some(idx);
+                                    if app.menu_open_idx == Some(idx) {
+                                        // Toggle off if clicking same menu
+                                        app.menu_open_idx = None;
+                                    } else {
+                                        app.menu_open_idx = Some(idx);
+                                    }
+                                    app.menu_hover_idx = None;
                                 } else {
                                     app.menu_open_idx = None;
+                                    app.menu_hover_idx = None;
                                 }
                                 continue;
                             } else if let Some(idx) = app.menu_open_idx {
                                 let menu_x = (idx * 10) as u16;
-                                if mouse.column >= menu_x && mouse.column < menu_x + 15 && mouse.row >= 1 && mouse.row < 6 {
-                                     match idx {
-                                         0 => { 
-                                             if mouse.row == 1 { app.show_settings = true; } // File -> Settings
-                                             if mouse.row == 2 { app.should_quit = true; } // File -> Exit
-                                         },
-                                         1 => { // Edit
-                                             if mouse.row == 1 { 
-                                                 // Copy
-                                                 if app.active_panel == ActivePanel::Editor {
-                                                     if let Some(text) = app.editor_state.copy() {
-                                                          if let Some(clipboard) = &app.clipboard {
-                                                              if let Ok(mut clipboard) = clipboard.lock() {
-                                                                  let _ = clipboard.set_text(text);
-                                                              }
-                                                          }
-                                                      }
-                                                 }
-                                             }
-                                             if mouse.row == 2 { 
-                                                 // Paste
-                                                 if app.active_panel == ActivePanel::Editor {
-                                                     if let Some(clipboard) = &app.clipboard {
-                                                          if let Ok(mut clipboard) = clipboard.lock() {
-                                                              if let Ok(text) = clipboard.get_text() {
-                                                                  app.editor_state.paste(&text);
-                                                              }
-                                                          }
-                                                      }
-                                                 } else if app.active_panel == ActivePanel::Terminal {
-                                                     if let Some(clipboard) = &app.clipboard {
-                                                         if let Ok(mut clipboard) = clipboard.lock() {
-                                                             if let Ok(text) = clipboard.get_text() {
-                                                                 let _ = app.pty_writer.write_all(text.as_bytes());
-                                                                 let _ = app.pty_writer.flush();
-                                                             }
-                                                         }
-                                                     }
-                                                 }
-                                             }
-                                         },
-                                         2 => { if mouse.row == 1 { app.active_panel = ActivePanel::Editor; } }, // View -> Reset
-                                         3 => { // Help -> About
-                                             if mouse.row == 1 {
+                                let menu_items = App::get_menu_items(idx);
+                                let menu_width = 24u16;
+
+                                if mouse.column >= menu_x
+                                    && mouse.column < menu_x + menu_width
+                                    && mouse.row >= 2
+                                    && mouse.row < 2 + menu_items.len() as u16
+                                {
+                                    // Click on a menu item
+                                    let item_idx = (mouse.row - 2) as usize;
+                                    if let Some((_, action)) = menu_items.get(item_idx) {
+                                        // Execute the action
+                                        match action {
+                                            Action::Quit => app.should_quit = true,
+                                            Action::OpenSettings => app.show_settings = true,
+                                            Action::FileSearch => {
+                                                app.is_searching = true;
+                                                app.on_search_input();
+                                            }
+                                            Action::Copy => {
+                                                if app.active_panel == ActivePanel::Editor {
+                                                    if let Some(text) = app.editor_state.copy() {
+                                                        if let Some(clipboard) = &app.clipboard {
+                                                            if let Ok(mut clipboard) = clipboard.lock() {
+                                                                let _ = clipboard.set_text(text);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Action::Paste => {
+                                                if app.active_panel == ActivePanel::Editor {
+                                                    if let Some(clipboard) = &app.clipboard {
+                                                        if let Ok(mut clipboard) = clipboard.lock() {
+                                                            if let Ok(text) = clipboard.get_text() {
+                                                                app.editor_state.paste(&text);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if app.active_panel == ActivePanel::Terminal {
+                                                    if let Some(clipboard) = &app.clipboard {
+                                                        if let Ok(mut clipboard) = clipboard.lock() {
+                                                            if let Ok(text) = clipboard.get_text() {
+                                                                let _ = app.pty_writer.write_all(text.as_bytes());
+                                                                let _ = app.pty_writer.flush();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Action::ResetLayout => app.active_panel = ActivePanel::Editor,
+                                            Action::DumpHistory => {
+                                                if let Ok(buffer) = app.history_buffer.read() {
+                                                    let clean_content = String::from_utf8_lossy(&buffer).to_string();
+                                                    let lines: Vec<String> = clean_content.lines().map(|s| s.to_string()).collect();
+                                                    app.editor_state.lines = if lines.is_empty() { vec![String::new()] } else { lines };
+                                                    app.editor_state.cursor_row = 0;
+                                                    app.editor_state.cursor_col = 0;
+                                                    app.editor_state.file_path = None;
+                                                    app.active_panel = ActivePanel::Editor;
+                                                }
+                                            }
+                                            Action::About => {
                                                 app.chat_history.push("AI: nterm v0.1.0 - A terminal IDE built in Rust.".to_string());
                                                 app.active_panel = ActivePanel::Chat;
-                                             }
-                                         },
-                                         _ => {} // Other menu items
-                                     }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
                                 app.menu_open_idx = None;
+                                app.menu_hover_idx = None;
                                 continue;
+                            } else {
+                                // Click outside menu closes it
+                                app.menu_open_idx = None;
+                                app.menu_hover_idx = None;
                             }
-
                         }
                     }
 

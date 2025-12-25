@@ -29,15 +29,22 @@ pub fn get_layout_chunks(area: Rect, active_panel: &ActivePanel) -> AppLayout {
 
     let menu = main_chunks[0];
 
+    // Chat panel expands to 35% when focused, otherwise 20%
+    let (file_tree_percent, middle_percent, chat_percent) = if *active_panel == ActivePanel::Chat {
+        (20, 45, 35)
+    } else {
+        (20, 60, 20)
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
+            Constraint::Percentage(file_tree_percent),
+            Constraint::Percentage(middle_percent),
+            Constraint::Percentage(chat_percent),
         ])
         .split(main_chunks[1]);
-        
+
     let file_tree = chunks[0];
 
     let (editor_percent, terminal_percent) = if *active_panel == ActivePanel::Terminal {
@@ -183,17 +190,39 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     );
 
     // Terminal
+    let terminal_border_style = if app.active_panel == ActivePanel::Terminal {
+        Style::default().fg(app.current_theme.border_active)
+    } else {
+        Style::default().fg(app.current_theme.border)
+    };
     let terminal_block = Block::default()
         .title(" Terminal ")
         .borders(Borders::ALL)
-        .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) })
+        .border_style(terminal_border_style)
         .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
 
     let screen = app.terminal_screen.read().unwrap();
     let pseudo_term = PseudoTerminal::new(screen.screen())
-        .block(terminal_block);
+        .block(terminal_block.clone());
 
     f.render_widget(pseudo_term, layout.terminal);
+
+    // Post-process: Replace Color::Reset backgrounds with theme background
+    // tui-term uses Color::Reset for "default" terminal colors, which renders as black
+    // We override these to match our theme (process entire terminal area including borders)
+    use ratatui::style::Color;
+    for y in layout.terminal.y..layout.terminal.y + layout.terminal.height {
+        for x in layout.terminal.x..layout.terminal.x + layout.terminal.width {
+            if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                if cell.bg == Color::Reset {
+                    cell.set_bg(app.current_theme.background);
+                }
+                if cell.fg == Color::Reset {
+                    cell.set_fg(app.current_theme.foreground);
+                }
+            }
+        }
+    }
     
     let terminal_scrollbar = Scrollbar::default()
         .orientation(ScrollbarOrientation::VerticalRight)
@@ -250,24 +279,44 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     // --- Menu Dropdown Overlay ---
     if let Some(idx) = app.menu_open_idx {
         let menu_x = (idx * 10) as u16;
-        let menu_items = match idx {
-            0 => vec![
-                ListItem::new(" Settings (Ctrl+S) "),
-                ListItem::new(" Exit (Ctrl+Q) "),
-            ],
-            1 => vec![ListItem::new(" Copy (Ctrl+C) "), ListItem::new(" Paste (Ctrl+V) ")],
-            2 => vec![ListItem::new(" Reset Layout (Ctrl+R) ")],
-            3 => vec![ListItem::new(" About ")],
-            _ => vec![],
-        };
-        
+        let raw_items = crate::app::App::get_menu_items(idx);
+
+        let menu_items: Vec<ListItem> = raw_items
+            .iter()
+            .enumerate()
+            .map(|(i, (label, _action))| {
+                let shortcut = match (idx, i) {
+                    (0, 0) => " (Ctrl+S)",
+                    (0, 1) => " (Ctrl+P)",
+                    (0, 2) => " (Ctrl+Q)",
+                    (1, 0) => " (Ctrl+C)",
+                    (1, 1) => " (Ctrl+V)",
+                    (2, 0) => " (Ctrl+R)",
+                    (2, 1) => " (Ctrl+H)",
+                    _ => "",
+                };
+                let text = format!(" {}{} ", label, shortcut);
+                let style = if app.menu_hover_idx == Some(i) {
+                    Style::default()
+                        .bg(app.current_theme.selection_bg)
+                        .fg(app.current_theme.selection_fg)
+                } else {
+                    Style::default()
+                        .bg(app.current_theme.background)
+                        .fg(app.current_theme.foreground)
+                };
+                ListItem::new(text).style(style)
+            })
+            .collect();
+
         let height = (menu_items.len() + 2) as u16;
-        let area = Rect::new(menu_x, 1, 20, height);
+        let width = 24;
+        let area = Rect::new(menu_x, 1, width, height);
         f.render_widget(Clear, area);
         f.render_widget(
             List::new(menu_items)
                 .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(app.current_theme.border)))
-                .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground)),
+                .style(Style::default().bg(app.current_theme.background)),
             area
         );
     }
