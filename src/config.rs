@@ -2,9 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+use crate::theme::ThemeMode;
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub theme: ThemeMode,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            gemini_api_key: None,
+            theme: ThemeMode::default(),
+        }
+    }
 }
 
 impl Config {

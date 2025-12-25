@@ -13,5 +13,8 @@ pub enum Action {
     FileSearch,
     CycleModel,
     OpenSettings,
+    Copy,
+    Paste,
+    About,
     None,
 }

@@ -5,6 +5,7 @@ mod ui;
 mod ai;
 mod config;
 mod editor;
+mod theme;
 
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -24,9 +25,34 @@ use crate::app::{App, AppEvent, ActivePanel};
 use crate::action::Action;
 use crate::ui::{ui, get_layout_chunks};
 use ratatui::layout::Rect;
+use std::env;
+use std::process::Command;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Check for --new-window flag
+    let args: Vec<String> = env::args().collect();
+    if !args.contains(&"--new-window".to_string()) {
+        if cfg!(target_os = "macos") {
+            let current_exe = env::current_exe()?;
+            let exe_path = current_exe.to_str().ok_or("Failed to get executable path")?;
+            
+            // Spawn new terminal window running this executable with --new-window
+            // Using osascript to tell Terminal to do this
+            let script = format!(
+                "tell application \"Terminal\" to do script \"{} --new-window\"",
+                exe_path
+            );
+            
+            Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .output()?;
+                
+            return Ok(());
+        }
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -109,6 +135,9 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                     if let Some(key) = &app.config.gemini_api_key {
                                         app.settings_input.insert_str(key);
                                     }
+                                },
+                                KeyCode::Tab => {
+                                    app.toggle_theme();
                                 },
                                 KeyCode::Enter => {
                                     let key = app.settings_input.lines()[0].trim().to_string();
@@ -205,6 +234,45 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 Action::OpenSettings => {
                                     app.show_settings = true;
                                 },
+                                Action::Copy => {
+                                    if app.active_panel == ActivePanel::Editor {
+                                        if let Some(text) = app.editor_state.copy() {
+                                            if let Some(clipboard) = &app.clipboard {
+                                                if let Ok(mut clipboard) = clipboard.lock() {
+                                                    let _ = clipboard.set_text(text);
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                Action::Paste => {
+                                     if app.active_panel == ActivePanel::Editor {
+                                        if let Some(clipboard) = &app.clipboard {
+                                            if let Ok(mut clipboard) = clipboard.lock() {
+                                                if let Ok(text) = clipboard.get_text() {
+                                                    app.editor_state.paste(&text);
+                                                }
+                                            }
+                                        }
+                                     } else if app.active_panel == ActivePanel::Terminal {
+                                        // Handle paste in terminal via global key check fallback?
+                                        // Or explicit handle here.
+                                        // Terminal uses PTY writer.
+                                        if let Some(clipboard) = &app.clipboard {
+                                            if let Ok(mut clipboard) = clipboard.lock() {
+                                                if let Ok(text) = clipboard.get_text() {
+                                                    let _ = app.pty_writer.write_all(text.as_bytes());
+                                                    let _ = app.pty_writer.flush();
+                                                }
+                                            }
+                                        }
+                                     }
+                                },
+                                Action::About => {
+                                    app.chat_history.push("AI: nterm v0.1.0 - A terminal IDE built in Rust.".to_string());
+                                    // Make sure chat is visible
+                                    app.active_panel = ActivePanel::Chat;
+                                },
                                 _ => {}
                             }
                             continue;
@@ -232,14 +300,59 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                 let menu_x = (idx * 10) as u16;
                                 if mouse.column >= menu_x && mouse.column < menu_x + 15 && mouse.row >= 1 && mouse.row < 6 {
                                      match idx {
-                                         0 => { if mouse.row == 2 { app.should_quit = true; } }, // File -> Exit
-                                         2 => { if mouse.row == 2 { app.active_panel = ActivePanel::Editor; } }, // View -> Reset
+                                         0 => { 
+                                             if mouse.row == 1 { app.show_settings = true; } // File -> Settings
+                                             if mouse.row == 2 { app.should_quit = true; } // File -> Exit
+                                         },
+                                         1 => { // Edit
+                                             if mouse.row == 1 { 
+                                                 // Copy
+                                                 if app.active_panel == ActivePanel::Editor {
+                                                     if let Some(text) = app.editor_state.copy() {
+                                                          if let Some(clipboard) = &app.clipboard {
+                                                              if let Ok(mut clipboard) = clipboard.lock() {
+                                                                  let _ = clipboard.set_text(text);
+                                                              }
+                                                          }
+                                                      }
+                                                 }
+                                             }
+                                             if mouse.row == 2 { 
+                                                 // Paste
+                                                 if app.active_panel == ActivePanel::Editor {
+                                                     if let Some(clipboard) = &app.clipboard {
+                                                          if let Ok(mut clipboard) = clipboard.lock() {
+                                                              if let Ok(text) = clipboard.get_text() {
+                                                                  app.editor_state.paste(&text);
+                                                              }
+                                                          }
+                                                      }
+                                                 } else if app.active_panel == ActivePanel::Terminal {
+                                                     if let Some(clipboard) = &app.clipboard {
+                                                         if let Ok(mut clipboard) = clipboard.lock() {
+                                                             if let Ok(text) = clipboard.get_text() {
+                                                                 let _ = app.pty_writer.write_all(text.as_bytes());
+                                                                 let _ = app.pty_writer.flush();
+                                                             }
+                                                         }
+                                                     }
+                                                 }
+                                             }
+                                         },
+                                         2 => { if mouse.row == 1 { app.active_panel = ActivePanel::Editor; } }, // View -> Reset
+                                         3 => { // Help -> About
+                                             if mouse.row == 1 {
+                                                app.chat_history.push("AI: nterm v0.1.0 - A terminal IDE built in Rust.".to_string());
+                                                app.active_panel = ActivePanel::Chat;
+                                             }
+                                         },
                                          _ => {} // Other menu items
                                      }
                                 }
                                 app.menu_open_idx = None;
                                 continue;
                             }
+
                         }
                     }
 

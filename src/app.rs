@@ -21,6 +21,7 @@ use crate::file_tree::{FileNode, VisibleItem, flatten_node, toggle_node_recursiv
 use crate::ai::{Model, send_message};
 use crate::config::Config;
 use crate::editor::EditorState;
+use crate::theme::Theme;
 
 #[derive(PartialEq)]
 
@@ -140,6 +141,7 @@ pub struct App<'a> {
 
     pub key_map: HashMap<(KeyCode, KeyModifiers), Action>,
 
+    pub current_theme: Theme,
 }
 
 
@@ -335,8 +337,12 @@ impl<'a> App<'a> {
         key_map.insert((KeyCode::Char('m'), KeyModifiers::CONTROL), Action::CycleModel);
 
         key_map.insert((KeyCode::Char('s'), KeyModifiers::CONTROL), Action::OpenSettings);
+        key_map.insert((KeyCode::Char('c'), KeyModifiers::CONTROL), Action::Copy);
+        key_map.insert((KeyCode::Char('v'), KeyModifiers::CONTROL), Action::Paste);
 
 
+
+        let theme_mode = config.theme;
 
         let mut app = Self {
 
@@ -345,7 +351,7 @@ impl<'a> App<'a> {
             visible_items: Vec::new(),
 
             selected_file_idx: 0,
-
+            
             file_tree_state: ListState::default(),
 
             file_tree_scroll_offset: 0,
@@ -417,6 +423,8 @@ impl<'a> App<'a> {
             menu_open_idx: None,
 
             key_map,
+
+            current_theme: Theme::new(theme_mode),
 
         };
 
@@ -515,6 +523,25 @@ impl<'a> App<'a> {
         };
     }
     
+    pub fn toggle_theme(&mut self) {
+        self.config.theme = match self.config.theme {
+            crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
+            crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
+        };
+        self.current_theme = Theme::new(self.config.theme);
+        let _ = self.config.save();
+
+        // Send OSC escape codes to update terminal default colors
+        let (fg, bg) = match self.config.theme {
+            crate::theme::ThemeMode::Light => ("#000000", "#FFFFFF"),
+            crate::theme::ThemeMode::Dark => ("#FFFFFF", "#000000"),
+        };
+        // OSC 10: Set default foreground, OSC 11: Set default background
+        let payload = format!("\x1b]10;{}\x07\x1b]11;{}\x07", fg, bg);
+        let _ = self.pty_writer.write_all(payload.as_bytes());
+        let _ = self.pty_writer.flush();
+    }
+
     pub fn send_chat_message(&mut self, content: String) {
         self.chat_history.push(format!("You: {}", content));
         

@@ -322,6 +322,20 @@ impl EditorState {
             Err(_) => Line::from(content.to_string()),
         }
     }
+    pub fn copy(&self) -> Option<String> {
+        // TODO: Implement selection support. For now, copy current line.
+        Some(self.current_line().to_string())
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\n' {
+                self.insert_newline();
+            } else {
+                self.insert_char(c);
+            }
+        }
+    }
 }
 
 /// Widget for rendering the editor with syntax highlighting

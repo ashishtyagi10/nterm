@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
     Frame,
 };
@@ -75,6 +75,10 @@ pub fn get_layout_chunks(area: Rect, active_panel: &ActivePanel) -> AppLayout {
 pub fn ui(f: &mut Frame, app: &mut App) {
     let layout = get_layout_chunks(f.area(), &app.active_panel);
 
+    // Apply main background color
+    f.render_widget(Block::default().style(Style::default().bg(app.current_theme.background)), f.area());
+
+
     // --- Menu Bar ---
     let menu_bar_area = layout.menu;
     let menu_titles_count = app.menu_titles.len();
@@ -90,9 +94,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         
     for (i, title) in app.menu_titles.iter().enumerate() {
         let style = if app.menu_open_idx == Some(i) {
-            Style::default().fg(Color::Black).bg(Color::White)
+            Style::default().fg(app.current_theme.selection_fg).bg(app.current_theme.selection_bg)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(app.current_theme.foreground)
         };
         f.render_widget(Paragraph::new(title.as_str()).style(style), menu_chunks[i]);
     }
@@ -112,9 +116,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         .map(|(i, item)| {
             let actual_idx = app.file_tree_scroll_offset + i;
             let style = if actual_idx == app.selected_file_idx {
-                Style::default().bg(Color::Blue).fg(Color::White)
+                Style::default().bg(app.current_theme.selection_bg).fg(app.current_theme.selection_fg)
             } else {
-                Style::default()
+                Style::default().fg(if item.is_dir { app.current_theme.directory } else { app.current_theme.file })
             };
             
             let prefix = if item.is_dir {
@@ -132,7 +136,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let file_tree_block = Block::default()
         .title(" File Tree ")
         .borders(Borders::ALL)
-        .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(Color::Yellow) } else { Style::default() });
+        .border_style(if app.active_panel == ActivePanel::FileTree { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) });
     
     app.file_tree_state.select(None);
     
@@ -159,12 +163,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .borders(Borders::ALL)
             .title(editor_title)
             .border_style(if app.active_panel == ActivePanel::Editor {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(app.current_theme.border_active)
             } else {
-                Style::default()
+                Style::default().fg(app.current_theme.border)
             }))
-        .line_number_style(Style::default().fg(Color::DarkGray))
-        .cursor_style(Style::default().bg(Color::White).fg(Color::Black))
+        .line_number_style(Style::default().fg(app.current_theme.line_number))
+        .cursor_style(Style::default().bg(app.current_theme.cursor_bg).fg(app.current_theme.cursor_fg))
         .focused(app.active_panel == ActivePanel::Editor);
 
     f.render_stateful_widget(editor_widget, layout.editor, &mut app.editor_state);
@@ -182,11 +186,13 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let terminal_block = Block::default()
         .title(" Terminal ")
         .borders(Borders::ALL)
-        .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(Color::Yellow) } else { Style::default() });
+        .border_style(if app.active_panel == ActivePanel::Terminal { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) })
+        .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
 
     let screen = app.terminal_screen.read().unwrap();
     let pseudo_term = PseudoTerminal::new(screen.screen())
         .block(terminal_block);
+
     f.render_widget(pseudo_term, layout.terminal);
     
     let terminal_scrollbar = Scrollbar::default()
@@ -208,7 +214,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let chat_history_block = Block::default()
         .title(format!(" AI Chat ({}) (Ctrl+M to Switch) ", app.selected_model))
         .borders(Borders::ALL)
-        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() });
+        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) });
 
     // Calculate max scroll based on content height
     let chat_inner_height = layout.chat_history.height.saturating_sub(2) as usize; // Subtract borders
@@ -216,8 +222,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let max_scroll = total_lines.saturating_sub(chat_inner_height) as u16;
     app.chat_scroll = app.chat_scroll.min(max_scroll);
 
+    // Create paragraph with style
     let chat_paragraph = Paragraph::new(chat_text)
         .block(chat_history_block)
+        .style(Style::default().fg(app.current_theme.foreground))
         .wrap(Wrap { trim: true })
         .scroll((app.chat_scroll, 0));
 
@@ -236,14 +244,17 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     chat_input.set_block(Block::default()
         .borders(Borders::ALL)
         .title(" Chat Input ")
-        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(Color::Yellow) } else { Style::default() }));
+        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) }));
     f.render_widget(&chat_input, layout.chat_input);
 
     // --- Menu Dropdown Overlay ---
     if let Some(idx) = app.menu_open_idx {
         let menu_x = (idx * 10) as u16;
         let menu_items = match idx {
-            0 => vec![ListItem::new(" Exit (Ctrl+Q) ")],
+            0 => vec![
+                ListItem::new(" Settings (Ctrl+S) "),
+                ListItem::new(" Exit (Ctrl+Q) "),
+            ],
             1 => vec![ListItem::new(" Copy (Ctrl+C) "), ListItem::new(" Paste (Ctrl+V) ")],
             2 => vec![ListItem::new(" Reset Layout (Ctrl+R) ")],
             3 => vec![ListItem::new(" About ")],
@@ -255,7 +266,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(Clear, area);
         f.render_widget(
             List::new(menu_items)
-                .block(Block::default().borders(Borders::ALL)),
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(app.current_theme.border)))
+                .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground)),
             area
         );
     }
@@ -267,7 +279,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         
         let block = Block::default()
             .title(" File Search (Esc to Close) ")
-            .borders(Borders::ALL);
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.current_theme.border))
+            .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
         f.render_widget(block.clone(), area);
         
         let inner_area = block.inner(area);
@@ -284,7 +298,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             
         let list = List::new(items)
             .block(Block::default().borders(Borders::TOP))
-            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+            .highlight_style(Style::default().bg(app.current_theme.selection_bg).fg(app.current_theme.selection_fg));
             
         f.render_stateful_widget(list, chunks[1], &mut app.search_state);
     }
@@ -295,8 +309,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(Clear, area);
         
         let block = Block::default()
-            .title(" Settings - Gemini API Key (Enter to Save, Esc to Cancel) ")
-            .borders(Borders::ALL);
+            .title(format!(" Settings - Gemini API Key (Enter to Save, Tab to Toggle Theme: {:?}) ", app.config.theme))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.current_theme.border))
+            .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
             
         let inner_area = block.inner(area);
         f.render_widget(block, area);
@@ -322,4 +338,39 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn test_get_layout_chunks() {
+        let area = Rect::new(0, 0, 100, 100);
+        let layout = get_layout_chunks(area, &ActivePanel::Editor);
+
+        // Check if areas are contained within main area
+        assert!(layout.menu.area() > 0);
+        assert!(layout.file_tree.area() > 0);
+        assert!(layout.editor.area() > 0);
+        assert!(layout.terminal.area() > 0);
+        assert!(layout.chat_history.area() > 0);
+        assert!(layout.chat_input.area() > 0);
+        
+        // Basic split checks
+        assert_eq!(layout.menu.y, 0);
+        assert_eq!(layout.menu.height, 1);
+    }
+    
+    #[test]
+    fn test_centered_rect() {
+        let area = Rect::new(0, 0, 100, 100);
+        let center = centered_rect(50, 50, area);
+        
+        assert_eq!(center.width, 50);
+        assert_eq!(center.height, 50);
+        assert_eq!(center.x, 25);
+        assert_eq!(center.y, 25);
+    }
 }

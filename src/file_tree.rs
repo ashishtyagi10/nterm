@@ -96,3 +96,91 @@ pub fn toggle_node_recursive(nodes: &mut Vec<FileNode>, target: &PathBuf) -> boo
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_file_node_from_path() {
+        let path = PathBuf::from("/tmp/test_dir");
+        let node = FileNode::from_path(path.clone(), 0);
+        
+        assert_eq!(node.path, path);
+        assert_eq!(node.name, "test_dir");
+        assert_eq!(node.depth, 0);
+        assert_eq!(node.expanded, false);
+        assert!(node.children.is_empty());
+    }
+
+    #[test]
+    fn test_flatten_node() {
+        let mut root = FileNode {
+            path: PathBuf::from("root"),
+            name: "root".to_string(),
+            is_dir: true,
+            expanded: true,
+            children: vec![],
+            depth: 0,
+        };
+
+        let child1 = FileNode {
+            path: PathBuf::from("root/child1"),
+            name: "child1".to_string(),
+            is_dir: false,
+            expanded: false,
+            children: vec![],
+            depth: 1,
+        };
+        
+        let child2 = FileNode {
+            path: PathBuf::from("root/child2"),
+            name: "child2".to_string(),
+            is_dir: true,
+            expanded: false,
+            children: vec![],
+            depth: 1,
+        };
+
+        root.children.push(child1);
+        root.children.push(child2);
+
+        let mut visible = Vec::new();
+        flatten_node(&root, &mut visible);
+
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].name, "root");
+        assert_eq!(visible[1].name, "child1");
+        assert_eq!(visible[2].name, "child2");
+    }
+
+    #[test]
+    fn test_flatten_node_collapsed() {
+         let mut root = FileNode {
+            path: PathBuf::from("root"),
+            name: "root".to_string(),
+            is_dir: true,
+            expanded: false, // Collapsed
+            children: vec![],
+            depth: 0,
+        };
+
+        let child1 = FileNode {
+            path: PathBuf::from("root/child1"),
+            name: "child1".to_string(),
+            is_dir: false,
+            expanded: false,
+            children: vec![],
+            depth: 1,
+        };
+
+        root.children.push(child1);
+
+        let mut visible = Vec::new();
+        flatten_node(&root, &mut visible);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "root");
+    }
+}
