@@ -5,20 +5,55 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::widget::{
-    button, column, container, row, scrollable, text, text_input, Column, Space,
+    button, column, container, mouse_area, row, scrollable, text, text_input, Column, Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use iced::keyboard::{self, Key};
+use iced::mouse;
 
 use crate::shared::{Config, flatten_node, FileNode, VisibleItem, ThemeMode};
 
-use super::message::{Message, Panel};
+use super::message::{Divider, Message, Panel};
 use super::theme::{get_iced_theme, panel_style, TerminalColors};
 use super::terminal_widget::TerminalView;
 
 const FONT_SIZE: u16 = 13;
 const HEADER_SIZE: u16 = 12;
 const MENU_SIZE: u16 = 12;
+const DIVIDER_WIDTH: f32 = 4.0;
+
+// Text input IDs for focus management
+const CHAT_INPUT_ID: &str = "chat_input";
+
+/// Panel layout sizes (as fractions 0.0 to 1.0)
+#[derive(Debug, Clone, Copy)]
+pub struct PanelSizes {
+    /// File tree width fraction (of total width)
+    pub file_tree_width: f32,
+    /// Chat width fraction (of total width)
+    pub chat_width: f32,
+    /// Editor height fraction (of middle section height)
+    pub editor_height: f32,
+}
+
+impl Default for PanelSizes {
+    fn default() -> Self {
+        Self {
+            file_tree_width: 0.20,  // 20%
+            chat_width: 0.20,       // 20%
+            editor_height: 0.60,    // 60% of middle
+        }
+    }
+}
+
+impl PanelSizes {
+    /// Clamp all values to valid ranges
+    pub fn clamp(&mut self) {
+        self.file_tree_width = self.file_tree_width.clamp(0.10, 0.40);
+        self.chat_width = self.chat_width.clamp(0.10, 0.40);
+        self.editor_height = self.editor_height.clamp(0.20, 0.80);
+    }
+}
 
 pub struct NtermGui {
     // Core state (reused from TUI)
@@ -44,6 +79,14 @@ pub struct NtermGui {
     active_panel: Panel,
     colors: TerminalColors,
 
+    // Panel sizing
+    panel_sizes: PanelSizes,
+    dragging_divider: Option<Divider>,
+    window_size: (f32, f32),
+
+    // Menu state
+    menu_open_idx: Option<usize>,
+
     // Current workspace
     workspace_path: PathBuf,
 }
@@ -62,7 +105,7 @@ impl NtermGui {
             file_tree: Vec::new(),
             visible_items: Vec::new(),
             selected_idx: 0,
-            editor_content: String::from("// Welcome to nterm GUI\n// Select a file from the file tree to edit\n// \n// Keyboard shortcuts:\n//   Tab        - Cycle panels\n//   Ctrl+T     - Toggle theme\n//   Ctrl+Q     - Quit\n//   Arrow keys - Navigate"),
+            editor_content: String::from("// Welcome to nterm GUI\n// Select a file from the file tree to edit\n// \n// Keyboard shortcuts:\n//   Tab        - Cycle panels\n//   Ctrl+T     - Toggle theme\n//   Ctrl+Q     - Quit\n//   Arrow keys - Navigate\n//   Drag dividers to resize panels"),
             editor_file_path: None,
             editor_scroll: 0,
             terminal_view: TerminalView::new(),
@@ -73,6 +116,10 @@ impl NtermGui {
             theme_mode,
             active_panel: Panel::FileTree,
             colors,
+            panel_sizes: PanelSizes::default(),
+            dragging_divider: None,
+            window_size: (1200.0, 800.0),
+            menu_open_idx: None,
             workspace_path,
         };
 
@@ -136,6 +183,59 @@ impl NtermGui {
         self.update_visible_items();
     }
 
+    /// Preview a file in the editor without changing panel focus
+    fn preview_file(&mut self, idx: usize) {
+        if idx >= self.visible_items.len() {
+            return;
+        }
+
+        let item = &self.visible_items[idx];
+        if item.is_dir {
+            return; // Don't preview directories
+        }
+
+        let path = item.path.clone();
+
+        // Skip if already viewing this file
+        if self.editor_file_path.as_ref() == Some(&path) {
+            return;
+        }
+
+        // Check file size first to avoid blocking on large files
+        const MAX_PREVIEW_SIZE: u64 = 512 * 1024; // 512KB limit for preview
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                if metadata.len() > MAX_PREVIEW_SIZE {
+                    self.editor_content = format!(
+                        "// File too large to preview ({:.1} MB)\n// Press Enter to open anyway",
+                        metadata.len() as f64 / (1024.0 * 1024.0)
+                    );
+                    self.editor_file_path = Some(path);
+                    self.editor_scroll = 0;
+                    return;
+                }
+            }
+            Err(_) => {
+                // Can't read metadata, try to read anyway
+            }
+        }
+
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                self.editor_content = content;
+                self.editor_file_path = Some(path);
+                self.editor_scroll = 0;
+            }
+            Err(e) => {
+                // Could be binary file or permission error
+                self.editor_content = format!("// Cannot preview: {}", e);
+                self.editor_file_path = Some(path);
+                self.editor_scroll = 0;
+            }
+        }
+    }
+
+    /// Load a file and switch focus to editor (used for Enter key and mouse click)
     fn load_file(&mut self, idx: usize) {
         if idx >= self.visible_items.len() {
             return;
@@ -147,18 +247,9 @@ impl NtermGui {
             return;
         }
 
-        let path = item.path.clone();
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                self.editor_content = content;
-                self.editor_file_path = Some(path);
-                self.editor_scroll = 0;
-            }
-            Err(e) => {
-                self.editor_content = format!("// Error loading file: {}", e);
-                self.editor_file_path = None;
-            }
-        }
+        self.preview_file(idx);
+        // Switch focus to editor when explicitly opening a file
+        self.active_panel = Panel::Editor;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -221,29 +312,78 @@ impl NtermGui {
             }
             Message::FocusPanel(panel) => {
                 self.active_panel = panel;
+                if panel == Panel::Chat {
+                    return text_input::focus(text_input::Id::new(CHAT_INPUT_ID));
+                }
             }
             Message::CyclePanel => {
                 self.active_panel = self.active_panel.next();
-            }
-            Message::KeyPressed(key, modifiers) => {
-                self.handle_key(key, modifiers);
-            }
-            Message::MenuNewFile => {
-                self.editor_content = String::new();
-                self.editor_file_path = None;
-            }
-            Message::MenuOpenFolder => {
-                // TODO: implement folder picker
-            }
-            Message::MenuSaveFile => {
-                if let Some(path) = &self.editor_file_path {
-                    let _ = fs::write(path, &self.editor_content);
+                if self.active_panel == Panel::Chat {
+                    return text_input::focus(text_input::Id::new(CHAT_INPUT_ID));
                 }
             }
-            Message::MenuSettings => {
-                // TODO: show settings modal
+            Message::KeyPressed(key, modifiers) => {
+                return self.handle_key(key, modifiers);
             }
+            // Menu dropdown
+            Message::MenuToggle(idx) => {
+                if self.menu_open_idx == Some(idx) {
+                    self.menu_open_idx = None;
+                } else {
+                    self.menu_open_idx = Some(idx);
+                }
+            }
+            Message::MenuClose => {
+                self.menu_open_idx = None;
+            }
+            // File menu actions
+            Message::MenuSettings => {
+                self.menu_open_idx = None;
+                // TODO: show settings modal
+                self.chat_messages.push((
+                    "System".to_string(),
+                    "Settings not yet implemented in GUI".to_string(),
+                ));
+            }
+            Message::MenuFileSearch => {
+                self.menu_open_idx = None;
+                // TODO: show file search modal
+                self.chat_messages.push((
+                    "System".to_string(),
+                    "File search not yet implemented in GUI".to_string(),
+                ));
+            }
+            Message::MenuExit => {
+                std::process::exit(0);
+            }
+            // Edit menu actions
+            Message::MenuCopy => {
+                self.menu_open_idx = None;
+                // TODO: implement copy
+            }
+            Message::MenuPaste => {
+                self.menu_open_idx = None;
+                // TODO: implement paste
+            }
+            // View menu actions
+            Message::MenuResetLayout => {
+                self.menu_open_idx = None;
+                self.panel_sizes = PanelSizes::default();
+                self.active_panel = Panel::Editor;
+            }
+            Message::MenuToggleTheme => {
+                self.menu_open_idx = None;
+                self.theme_mode = match self.theme_mode {
+                    ThemeMode::Dark => ThemeMode::Light,
+                    ThemeMode::Light => ThemeMode::Dark,
+                };
+                self.colors = TerminalColors::from_mode(self.theme_mode);
+                self.config.theme = self.theme_mode;
+                let _ = self.config.save();
+            }
+            // Help menu actions
             Message::MenuAbout => {
+                self.menu_open_idx = None;
                 self.chat_messages.push((
                     "System".to_string(),
                     "nterm v0.1.0 - A terminal-based IDE".to_string(),
@@ -253,19 +393,53 @@ impl NtermGui {
                 std::process::exit(0);
             }
             Message::EditorScroll(_) => {}
-            Message::WindowResized(_, _) => {}
+            Message::WindowResized(w, h) => {
+                self.window_size = (w as f32, h as f32);
+            }
+            Message::DividerDragStart(divider) => {
+                self.dragging_divider = Some(divider);
+            }
+            Message::DividerDrag(x, y) => {
+                if let Some(divider) = self.dragging_divider {
+                    let (width, height) = self.window_size;
+                    match divider {
+                        Divider::FileTreeRight => {
+                            self.panel_sizes.file_tree_width = x / width;
+                        }
+                        Divider::ChatLeft => {
+                            self.panel_sizes.chat_width = 1.0 - (x / width);
+                        }
+                        Divider::EditorBottom => {
+                            // Calculate relative to middle section
+                            let menu_height = 30.0;
+                            let status_height = 25.0;
+                            let content_height = height - menu_height - status_height;
+                            let relative_y = y - menu_height;
+                            self.panel_sizes.editor_height = relative_y / content_height;
+                        }
+                    }
+                    self.panel_sizes.clamp();
+                }
+            }
+            Message::DividerDragEnd => {
+                self.dragging_divider = None;
+            }
         }
 
         Task::none()
     }
 
-    fn handle_key(&mut self, key: Key, modifiers: keyboard::Modifiers) {
+    fn handle_key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Message> {
         // Global shortcuts first
         match key.as_ref() {
             Key::Named(keyboard::key::Named::Tab) => {
                 if !modifiers.control() {
                     self.active_panel = self.active_panel.next();
-                    return;
+                    // Focus chat input when switching to Chat panel
+                    if self.active_panel == Panel::Chat {
+                        return text_input::focus(text_input::Id::new(CHAT_INPUT_ID));
+                    }
+                    return Task::none();
                 }
             }
             Key::Character("t") if modifiers.control() => {
@@ -276,13 +450,23 @@ impl NtermGui {
                 self.colors = TerminalColors::from_mode(self.theme_mode);
                 self.config.theme = self.theme_mode;
                 let _ = self.config.save();
-                return;
+                return Task::none();
             }
             Key::Character("q") if modifiers.control() => {
                 std::process::exit(0);
             }
+            Key::Named(keyboard::key::Named::Escape) => {
+                // Close menu if open
+                if self.menu_open_idx.is_some() {
+                    self.menu_open_idx = None;
+                    return Task::none();
+                }
+            }
             _ => {}
         }
+
+        // Close menu on any other key press
+        self.menu_open_idx = None;
 
         // Panel-specific handling
         match self.active_panel {
@@ -291,11 +475,15 @@ impl NtermGui {
                     Key::Named(keyboard::key::Named::ArrowUp) => {
                         if self.selected_idx > 0 {
                             self.selected_idx -= 1;
+                            // Preview file on keyboard navigation (keeps focus in file tree)
+                            self.preview_file(self.selected_idx);
                         }
                     }
                     Key::Named(keyboard::key::Named::ArrowDown) => {
                         if self.selected_idx + 1 < self.visible_items.len() {
                             self.selected_idx += 1;
+                            // Preview file on keyboard navigation (keeps focus in file tree)
+                            self.preview_file(self.selected_idx);
                         }
                     }
                     Key::Named(keyboard::key::Named::Enter) => {
@@ -370,6 +558,7 @@ impl NtermGui {
             }
             Panel::Editor | Panel::Chat => {}
         }
+        Task::none()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -385,7 +574,24 @@ impl NtermGui {
             Subscription::none()
         };
 
-        Subscription::batch([keyboard_sub, terminal_sub])
+        // Mouse tracking for divider dragging
+        let mouse_sub = if self.dragging_divider.is_some() {
+            iced::event::listen_with(|event, _status, _id| {
+                match event {
+                    iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                        Some(Message::DividerDrag(position.x, position.y))
+                    }
+                    iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                        Some(Message::DividerDragEnd)
+                    }
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([keyboard_sub, terminal_sub, mouse_sub])
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -394,24 +600,89 @@ impl NtermGui {
         let editor_panel = self.view_editor();
         let terminal_panel = self.view_terminal();
         let chat_panel = self.view_chat();
+        let colors = self.colors;
 
-        // Middle section: Editor on top (60%), Terminal on bottom (40%)
-        // Matches TUI layout from ui.rs
+        // Calculate FillPortion values - adjust based on active panel (like TUI)
+        // Chat expands to 35% when focused (normally 20%)
+        // Terminal expands to 55% height when focused (normally 40%)
+        let (file_tree_portion, chat_portion) = if self.active_panel == Panel::Chat {
+            (20u16, 35u16) // Chat focused: expand chat to 35%
+        } else {
+            (
+                (self.panel_sizes.file_tree_width * 100.0) as u16,
+                (self.panel_sizes.chat_width * 100.0) as u16,
+            )
+        };
+        let middle_portion = 100 - file_tree_portion - chat_portion;
+
+        let (editor_portion, terminal_portion) = if self.active_panel == Panel::Terminal {
+            (45u16, 55u16) // Terminal focused: expand terminal to 55%
+        } else {
+            let editor = (self.panel_sizes.editor_height * 100.0) as u16;
+            (editor, 100 - editor)
+        };
+
+        // Vertical divider style (between horizontal panels) - transparent, only visible when dragging
+        let v_divider = |divider: Divider| -> Element<'_, Message> {
+            let is_dragging = self.dragging_divider == Some(divider);
+            mouse_area(
+                container(Space::new(DIVIDER_WIDTH, Length::Fill))
+                    .style(move |_theme| container::Style {
+                        background: if is_dragging {
+                            Some(colors.border_active.into())
+                        } else {
+                            None // Transparent when not dragging
+                        },
+                        ..Default::default()
+                    })
+            )
+            .on_press(Message::DividerDragStart(divider))
+            .into()
+        };
+
+        // Horizontal divider style (between vertical panels) - transparent, only visible when dragging
+        let h_divider = |divider: Divider| -> Element<'_, Message> {
+            let is_dragging = self.dragging_divider == Some(divider);
+            mouse_area(
+                container(Space::new(Length::Fill, DIVIDER_WIDTH))
+                    .style(move |_theme| container::Style {
+                        background: if is_dragging {
+                            Some(colors.border_active.into())
+                        } else {
+                            None // Transparent when not dragging
+                        },
+                        ..Default::default()
+                    })
+            )
+            .on_press(Message::DividerDragStart(divider))
+            .into()
+        };
+
+        // Middle section: Editor on top, divider, Terminal on bottom
         let middle_section = column![
-            editor_panel,
-            terminal_panel,
-        ]
-        .spacing(1);
+            container(editor_panel)
+                .width(Length::Fill)
+                .height(Length::FillPortion(editor_portion)),
+            h_divider(Divider::EditorBottom),
+            container(terminal_panel)
+                .width(Length::Fill)
+                .height(Length::FillPortion(terminal_portion)),
+        ];
 
-        // Main content: [FileTree 20% | Middle (Editor+Terminal) 60% | Chat 20%]
+        // Main content with dividers
         let main_content = row![
-            file_tree_panel,
-            container(middle_section)
-                .width(Length::FillPortion(6))  // 60%
+            container(file_tree_panel)
+                .width(Length::FillPortion(file_tree_portion))
                 .height(Length::Fill),
-            chat_panel,
+            v_divider(Divider::FileTreeRight),
+            container(middle_section)
+                .width(Length::FillPortion(middle_portion))
+                .height(Length::Fill),
+            v_divider(Divider::ChatLeft),
+            container(chat_panel)
+                .width(Length::FillPortion(chat_portion))
+                .height(Length::Fill),
         ]
-        .spacing(1)
         .height(Length::Fill);
 
         // Status bar at bottom
@@ -503,18 +774,38 @@ impl NtermGui {
         ];
 
         container(content)
-            .width(Length::FillPortion(2))  // 20% of total
+            .width(Length::Fill)
             .height(Length::Fill)
+            .padding(2)
             .style(move |_theme| panel_style(&colors, is_active))
             .into()
     }
 
     fn view_menu_bar(&self) -> Element<'_, Message> {
         let colors = self.colors;
+        let menu_open = self.menu_open_idx;
 
-        let btn_style = move |_theme: &Theme, status: button::Status| {
+        // Menu button style
+        let menu_btn_style = move |idx: usize| {
+            move |_theme: &Theme, status: button::Status| {
+                let is_open = menu_open == Some(idx);
+                let bg = if is_open || matches!(status, button::Status::Hovered) {
+                    Some(colors.selection_bg.into())
+                } else {
+                    None
+                };
+                button::Style {
+                    background: bg,
+                    text_color: colors.foreground,
+                    ..Default::default()
+                }
+            }
+        };
+
+        // Menu item style
+        let item_style = move |_theme: &Theme, status: button::Status| {
             let bg = if matches!(status, button::Status::Hovered) {
-                Some(Color { a: 0.3, ..colors.selection_bg }.into())
+                Some(colors.selection_bg.into())
             } else {
                 None
             };
@@ -525,45 +816,108 @@ impl NtermGui {
             }
         };
 
-        let file_btn = button(text("File").size(MENU_SIZE).font(Font::MONOSPACE))
-            .on_press(Message::MenuNewFile)
+        // Menu titles (matching TUI exactly)
+        let file_btn = button(text(" File ").size(MENU_SIZE).font(Font::MONOSPACE))
+            .on_press(Message::MenuToggle(0))
             .padding([4, 10])
-            .style(btn_style);
+            .style(menu_btn_style(0));
 
-        let save_btn = button(text("Save").size(MENU_SIZE).font(Font::MONOSPACE))
-            .on_press(Message::MenuSaveFile)
+        let edit_btn = button(text(" Edit ").size(MENU_SIZE).font(Font::MONOSPACE))
+            .on_press(Message::MenuToggle(1))
             .padding([4, 10])
-            .style(btn_style);
+            .style(menu_btn_style(1));
 
-        let theme_btn = button(text("Theme").size(MENU_SIZE).font(Font::MONOSPACE))
-            .on_press(Message::ToggleTheme)
+        let view_btn = button(text(" View ").size(MENU_SIZE).font(Font::MONOSPACE))
+            .on_press(Message::MenuToggle(2))
             .padding([4, 10])
-            .style(btn_style);
+            .style(menu_btn_style(2));
 
-        let about_btn = button(text("About").size(MENU_SIZE).font(Font::MONOSPACE))
-            .on_press(Message::MenuAbout)
+        let help_btn = button(text(" Help ").size(MENU_SIZE).font(Font::MONOSPACE))
+            .on_press(Message::MenuToggle(3))
             .padding([4, 10])
-            .style(btn_style);
+            .style(menu_btn_style(3));
 
-        let quit_btn = button(text("Quit").size(MENU_SIZE).font(Font::MONOSPACE))
-            .on_press(Message::Quit)
-            .padding([4, 10])
-            .style(btn_style);
-
-        let menu = row![
+        let menu_buttons = row![
             file_btn,
-            save_btn,
-            theme_btn,
-            about_btn,
+            edit_btn,
+            view_btn,
+            help_btn,
             Space::with_width(Length::Fill),
-            quit_btn,
         ]
         .spacing(2)
         .padding([2, 5]);
 
-        container(menu)
-            .width(Length::Fill)
+        // Build dropdown if a menu is open
+        let dropdown: Element<'_, Message> = if let Some(idx) = self.menu_open_idx {
+            let items: Vec<(&str, Message)> = match idx {
+                0 => vec![
+                    ("Settings", Message::MenuSettings),
+                    ("File Search", Message::MenuFileSearch),
+                    ("Exit", Message::MenuExit),
+                ],
+                1 => vec![
+                    ("Copy", Message::MenuCopy),
+                    ("Paste", Message::MenuPaste),
+                ],
+                2 => vec![
+                    ("Reset Layout", Message::MenuResetLayout),
+                    ("Toggle Theme", Message::MenuToggleTheme),
+                ],
+                3 => vec![
+                    ("About", Message::MenuAbout),
+                ],
+                _ => vec![],
+            };
+
+            let menu_items: Vec<Element<'_, Message>> = items
+                .into_iter()
+                .map(|(label, msg)| {
+                    button(
+                        text(format!("  {}  ", label))
+                            .size(MENU_SIZE)
+                            .font(Font::MONOSPACE)
+                    )
+                    .on_press(msg)
+                    .width(Length::Fill)
+                    .padding([4, 8])
+                    .style(item_style)
+                    .into()
+                })
+                .collect();
+
+            let dropdown_content = Column::with_children(menu_items)
+                .spacing(0)
+                .width(Length::Shrink);
+
+            // Position dropdown below the menu button
+            let offset_x = (idx * 60) as u16; // Approximate button width
+
+            row![
+                Space::with_width(offset_x),
+                container(dropdown_content)
+                    .style(move |_theme| container::Style {
+                        background: Some(colors.background.into()),
+                        border: iced::Border {
+                            color: colors.border,
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .padding(2),
+                Space::with_width(Length::Fill),
+            ]
             .into()
+        } else {
+            Space::new(0, 0).into()
+        };
+
+        // Stack menu bar and dropdown
+        column![
+            menu_buttons,
+            dropdown,
+        ]
+        .into()
     }
 
     fn view_editor(&self) -> Element<'_, Message> {
@@ -622,7 +976,8 @@ impl NtermGui {
 
         container(content)
             .width(Length::Fill)
-            .height(Length::FillPortion(6))  // 60% of middle section height
+            .height(Length::Fill)
+            .padding(2)
             .style(move |_theme| panel_style(&colors, is_active))
             .into()
     }
@@ -688,7 +1043,8 @@ impl NtermGui {
 
         container(content)
             .width(Length::Fill)
-            .height(Length::FillPortion(4))  // 40% of middle section height
+            .height(Length::Fill)
+            .padding(2)
             .style(move |_theme| panel_style(&colors, is_active))
             .into()
     }
@@ -747,6 +1103,7 @@ impl NtermGui {
 
         // Chat input field
         let input_field = text_input("Type a message...", &self.chat_input)
+            .id(text_input::Id::new(CHAT_INPUT_ID))
             .on_input(Message::ChatInputChanged)
             .on_submit(Message::ChatSend)
             .padding(8)
@@ -809,8 +1166,9 @@ impl NtermGui {
         ];
 
         container(content)
-            .width(Length::FillPortion(2))  // 20% of total
+            .width(Length::Fill)
             .height(Length::Fill)
+            .padding(2)
             .style(move |_theme| panel_style(&colors, is_active))
             .into()
     }

@@ -237,8 +237,13 @@ impl Terminal {
                         break;
                     }
                     Ok(n) => {
-                        reader_parser.write().process(&buf[..n]);
+                        // Process in a scoped block to release the lock quickly
+                        {
+                            reader_parser.write().process(&buf[..n]);
+                        }
                         let _ = event_tx.send(TerminalEvent::Output);
+                        // Yield to allow GUI thread to acquire read lock
+                        thread::yield_now();
                     }
                     Err(e) => {
                         let _ = event_tx.send(TerminalEvent::Error(format!("Read error: {}", e)));
@@ -259,10 +264,13 @@ impl Terminal {
 
     /// Write input to terminal (keyboard)
     pub fn input(&self, data: &[u8]) -> Result<(), String> {
-        self.writer
-            .lock()
+        let mut writer = self.writer.lock();
+        writer
             .write_all(data)
-            .map_err(|e| format!("Write error: {}", e))
+            .map_err(|e| format!("Write error: {}", e))?;
+        writer
+            .flush()
+            .map_err(|e| format!("Flush error: {}", e))
     }
 
     /// Write a string as input

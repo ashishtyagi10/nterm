@@ -81,7 +81,10 @@ pub fn get_iced_theme(mode: &ThemeMode) -> IcedTheme {
     )
 }
 
-/// Panel container style with border
+/// Panel border radius constant
+pub const PANEL_RADIUS: f32 = 8.0;
+
+/// Panel container style with border and rounded corners
 pub fn panel_style(colors: &TerminalColors, is_active: bool) -> container::Style {
     let border_color = if is_active {
         colors.border_active
@@ -93,8 +96,8 @@ pub fn panel_style(colors: &TerminalColors, is_active: bool) -> container::Style
         background: Some(colors.background.into()),
         border: Border {
             color: border_color,
-            width: 1.0,
-            radius: 0.0.into(),
+            width: 2.0,
+            radius: PANEL_RADIUS.into(),
         },
         ..Default::default()
     }

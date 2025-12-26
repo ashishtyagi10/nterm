@@ -2,6 +2,17 @@
 
 use iced::keyboard;
 
+/// Identifies which divider is being dragged
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    /// Horizontal divider between file tree and middle section
+    FileTreeRight,
+    /// Horizontal divider between middle section and chat
+    ChatLeft,
+    /// Vertical divider between editor and terminal
+    EditorBottom,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // File tree interactions
@@ -29,14 +40,30 @@ pub enum Message {
     FocusPanel(Panel),
     CyclePanel,
 
+    // Panel resizing
+    DividerDragStart(Divider),
+    DividerDrag(f32, f32),  // (x, y) position
+    DividerDragEnd,
+
     // Keyboard events
     KeyPressed(keyboard::Key, keyboard::Modifiers),
 
-    // Menu actions
-    MenuNewFile,
-    MenuOpenFolder,
-    MenuSaveFile,
+    // Menu dropdown
+    MenuToggle(usize),  // Toggle menu dropdown by index
+    MenuClose,          // Close any open menu
+
+    // Menu actions (matching TUI)
+    // File menu (0)
     MenuSettings,
+    MenuFileSearch,
+    MenuExit,
+    // Edit menu (1)
+    MenuCopy,
+    MenuPaste,
+    // View menu (2)
+    MenuResetLayout,
+    MenuToggleTheme,
+    // Help menu (3)
     MenuAbout,
 
     // Application
