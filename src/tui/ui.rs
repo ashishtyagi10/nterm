@@ -7,9 +7,9 @@ use ratatui::{
 };
 use tui_term::widget::PseudoTerminal;
 
-use crate::app::{App, ActivePanel};
-use crate::editor::EditorWidget;
-use crate::theme::Theme;
+use super::app::{App, ActivePanel};
+use super::editor::EditorWidget;
+use super::theme::Theme;
 
 pub struct AppLayout {
     pub menu: Rect,
@@ -302,7 +302,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     // --- Menu Dropdown Overlay ---
     if let Some(idx) = app.menu_open_idx {
         let menu_x = (idx * 10) as u16;
-        let raw_items = crate::app::App::get_menu_items(idx);
+        let raw_items = App::get_menu_items(idx);
 
         let menu_items: Vec<ListItem> = raw_items
             .iter()

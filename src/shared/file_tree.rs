@@ -1,3 +1,5 @@
+// File tree data structures and operations
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -44,7 +46,7 @@ impl FileNode {
                 .map(|e| FileNode::from_path(e.path(), self.depth + 1))
                 .filter(|node| !node.name.starts_with('.'))
                 .collect();
-            
+
             files.sort_by(|a, b| {
                 match (a.is_dir, b.is_dir) {
                     (true, false) => std::cmp::Ordering::Less,
@@ -52,7 +54,7 @@ impl FileNode {
                     _ => a.name.cmp(&b.name),
                 }
             });
-            
+
             self.children = files;
         }
     }
@@ -106,7 +108,7 @@ mod tests {
     fn test_file_node_from_path() {
         let path = PathBuf::from("/tmp/test_dir");
         let node = FileNode::from_path(path.clone(), 0);
-        
+
         assert_eq!(node.path, path);
         assert_eq!(node.name, "test_dir");
         assert_eq!(node.depth, 0);
@@ -133,7 +135,7 @@ mod tests {
             children: vec![],
             depth: 1,
         };
-        
+
         let child2 = FileNode {
             path: PathBuf::from("root/child2"),
             name: "child2".to_string(),

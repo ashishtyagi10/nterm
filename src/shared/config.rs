@@ -1,9 +1,37 @@
+// Configuration management
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ai::{ModelConfig, default_models};
-use crate::theme::ThemeMode;
+use super::ai::{default_models, ModelConfig, Provider};
+use super::theme::ThemeMode;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentWorkspace {
+    pub path: PathBuf,
+    pub name: String,
+    pub last_accessed: u64,
+}
+
+impl RecentWorkspace {
+    pub fn new(path: PathBuf) -> Self {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        let last_accessed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            path,
+            name,
+            last_accessed,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -13,6 +41,8 @@ pub struct Config {
     pub models: Vec<ModelConfig>,
     #[serde(default)]
     pub selected_model_idx: usize,
+    #[serde(default)]
+    pub recent_workspaces: Vec<RecentWorkspace>,
     // Legacy field for backward compatibility
     #[serde(skip_serializing, default)]
     pub gemini_api_key: Option<String>,
@@ -24,6 +54,7 @@ impl Default for Config {
             theme: ThemeMode::default(),
             models: default_models(),
             selected_model_idx: 0,
+            recent_workspaces: Vec::new(),
             gemini_api_key: None,
         }
     }
@@ -38,7 +69,7 @@ impl Config {
             // Migrate legacy gemini_api_key to new model system
             if let Some(key) = config.gemini_api_key.take() {
                 if let Some(gemini_model) = config.models.iter_mut()
-                    .find(|m| m.provider == crate::ai::Provider::Gemini) {
+                    .find(|m| m.provider == Provider::Gemini) {
                     if gemini_model.api_key.is_none() {
                         gemini_model.api_key = Some(key);
                     }
@@ -81,5 +112,22 @@ impl Config {
         if !self.models.is_empty() {
             self.selected_model_idx = (self.selected_model_idx + 1) % self.models.len();
         }
+    }
+
+    pub fn add_recent_workspace(&mut self, path: PathBuf) {
+        const MAX_RECENT: usize = 10;
+
+        // Remove existing entry for this path if present
+        self.recent_workspaces.retain(|w| w.path != path);
+
+        // Add new entry at the front
+        self.recent_workspaces.insert(0, RecentWorkspace::new(path));
+
+        // Keep only MAX_RECENT entries
+        self.recent_workspaces.truncate(MAX_RECENT);
+    }
+
+    pub fn get_recent_workspaces(&self) -> &[RecentWorkspace] {
+        &self.recent_workspaces
     }
 }

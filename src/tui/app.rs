@@ -16,12 +16,12 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use walkdir::WalkDir;
 use arboard::Clipboard;
 
-use crate::action::Action;
-use crate::file_tree::{FileNode, VisibleItem, flatten_node, toggle_node_recursive};
-use crate::ai::send_message;
-use crate::config::Config;
-use crate::editor::EditorState;
-use crate::theme::Theme;
+use super::action::Action;
+use super::editor::EditorState;
+use super::theme::Theme;
+use crate::shared::{FileNode, VisibleItem, flatten_node, toggle_node_recursive};
+use crate::shared::send_message;
+use crate::shared::Config;
 
 #[derive(PartialEq)]
 
@@ -537,9 +537,10 @@ impl<'a> App<'a> {
     }
     
     pub fn toggle_theme(&mut self) {
+        use crate::shared::ThemeMode;
         self.config.theme = match self.config.theme {
-            crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
-            crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+            ThemeMode::Dark => ThemeMode::Light,
         };
         self.current_theme = Theme::new(self.config.theme);
         let _ = self.config.save();

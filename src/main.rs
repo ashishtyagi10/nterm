@@ -1,11 +1,8 @@
-mod action;
-mod file_tree;
-mod app;
-mod ui;
-mod ai;
-mod config;
-mod editor;
-mod theme;
+// Shared modules
+mod shared;
+
+// TUI module
+mod tui;
 
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -20,13 +17,12 @@ use std::error::Error;
 use std::io;
 use tui_textarea::TextArea;
 use ratatui::widgets::{Block, Borders};
-
-use crate::app::{App, AppEvent, ActivePanel};
-use crate::action::Action;
-use crate::ui::{ui, get_layout_chunks};
 use ratatui::layout::Rect;
 use std::env;
 use std::process::Command;
+
+use crate::tui::{App, AppEvent, ActivePanel, Action, ui, get_layout_chunks, WorkspaceSelector};
+use crate::shared::Config;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -60,7 +56,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Run app
+    // Load config and run workspace selector
+    let mut config = Config::load();
+    let mut selector = WorkspaceSelector::new(&config);
+    let workspace_path = match selector.run(&mut terminal)? {
+        Some(path) => path,
+        None => {
+            // User pressed Esc - exit gracefully
+            disable_raw_mode()?;
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+            terminal.show_cursor()?;
+            return Ok(());
+        }
+    };
+
+    // Change to selected workspace BEFORE App::new()
+    std::env::set_current_dir(&workspace_path)?;
+
+    // Update config with recent workspace and save
+    config.add_recent_workspace(workspace_path);
+    let _ = config.save();
+
+    // Run app (PTY and file tree will use selected workspace)
     let mut app = App::new();
     let res = run_app(&mut terminal, &mut app);
 
