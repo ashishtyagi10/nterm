@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_input, Column, Space,
+    button, column, container, mouse_area, row, scrollable, text, text_input, Column, Row, Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use iced::keyboard::{self, Key};
@@ -14,6 +14,7 @@ use iced::mouse;
 use crate::shared::{Config, flatten_node, FileNode, VisibleItem, ThemeMode};
 
 use super::message::{Divider, Message, Panel};
+use super::syntax::SyntaxHighlighter;
 use super::theme::{get_iced_theme, panel_style, TerminalColors};
 use super::terminal_widget::TerminalView;
 
@@ -89,6 +90,9 @@ pub struct NtermGui {
 
     // Current workspace
     workspace_path: PathBuf,
+
+    // Syntax highlighting
+    syntax_highlighter: SyntaxHighlighter,
 }
 
 impl NtermGui {
@@ -121,6 +125,7 @@ impl NtermGui {
             window_size: (1200.0, 800.0),
             menu_open_idx: None,
             workspace_path,
+            syntax_highlighter: SyntaxHighlighter::new(),
         };
 
         app.refresh_file_tree();
@@ -931,6 +936,12 @@ impl NtermGui {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
 
+        // Get file extension for syntax highlighting
+        let extension = self
+            .editor_file_path
+            .as_ref()
+            .and_then(|p| SyntaxHighlighter::extension_from_path(p));
+
         // Header
         let header = container(
             text(format!(" Editor - {}", file_name))
@@ -941,7 +952,7 @@ impl NtermGui {
         .padding([2, 5])
         .width(Length::Fill);
 
-        // Editor content with line numbers
+        // Editor content with syntax-highlighted line numbers
         let lines: Vec<Element<'_, Message>> = self
             .editor_content
             .lines()
@@ -952,10 +963,22 @@ impl NtermGui {
                     .font(Font::MONOSPACE)
                     .color(colors.line_number);
 
-                let line_content = text(line)
-                    .size(FONT_SIZE)
-                    .font(Font::MONOSPACE)
-                    .color(colors.foreground);
+                // Get syntax-highlighted spans for this line
+                let highlighted = self.syntax_highlighter.highlight_line(line, extension.as_deref());
+
+                // Build row of highlighted text spans
+                let spans: Vec<Element<'_, Message>> = highlighted
+                    .into_iter()
+                    .map(|span| {
+                        text(span.text)
+                            .size(FONT_SIZE)
+                            .font(Font::MONOSPACE)
+                            .color(span.color)
+                            .into()
+                    })
+                    .collect();
+
+                let line_content = Row::with_children(spans).spacing(0);
 
                 row![line_num, line_content]
                     .spacing(2)
