@@ -2,6 +2,12 @@
 name = "nterm"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal-based IDE with file tree, editor, terminal, and AI chat"
+license = "MIT"
+repository = "https://github.com/ashishtyagi10/nterm"
+readme = "README.md"
+keywords = ["terminal", "ide", "tui", "editor", "ai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 arboard = "3.6.1"
