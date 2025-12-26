@@ -1,6 +1,6 @@
 [package]
 name = "nterm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A terminal-based IDE with file tree, editor, terminal, and AI chat"
 license = "MIT"
@@ -14,11 +14,11 @@ name = "nterm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nterm"
+name = "nterm-cli"
 path = "src/main.rs"
 
 [[bin]]
-name = "nterm-gui"
+name = "nterm"
 path = "src/bin/nterm-gui.rs"
 
 [dependencies]
