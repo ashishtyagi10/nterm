@@ -18,7 +18,7 @@ use arboard::Clipboard;
 
 use crate::action::Action;
 use crate::file_tree::{FileNode, VisibleItem, flatten_node, toggle_node_recursive};
-use crate::ai::{Model, send_message};
+use crate::ai::send_message;
 use crate::config::Config;
 use crate::editor::EditorState;
 use crate::theme::Theme;
@@ -83,8 +83,6 @@ pub struct App<'a> {
 
     pub chat_scroll_state: ScrollbarState,
 
-    pub selected_model: Model,
-
     
 
     pub is_searching: bool,
@@ -100,6 +98,12 @@ pub struct App<'a> {
     pub show_settings: bool,
 
     pub settings_input: TextArea<'a>,
+
+    pub settings_model_idx: usize,
+
+    pub settings_editing: bool,  // Whether currently editing an API key
+
+    pub settings_scroll_offset: usize,  // Scroll offset for settings list
 
     pub config: Config,
 
@@ -171,13 +175,12 @@ impl<'a> App<'a> {
         let config = Config::load();
 
         let mut settings_input = TextArea::default();
-
-        settings_input.set_block(Block::default().borders(Borders::ALL).title(" Gemini API Key "));
-
-        if let Some(key) = &config.gemini_api_key {
-
-            settings_input.insert_str(key);
-
+        settings_input.set_block(Block::default().borders(Borders::ALL).title(" API Key "));
+        // Load API key from first model if available
+        if let Some(model) = config.models.first() {
+            if let Some(key) = &model.api_key {
+                settings_input.insert_str(key);
+            }
         }
 
 
@@ -376,9 +379,7 @@ impl<'a> App<'a> {
 
             chat_scroll_state: ScrollbarState::default(),
 
-            selected_model: Model::Gemini,
 
-            
 
             is_searching: false,
 
@@ -393,6 +394,12 @@ impl<'a> App<'a> {
             show_settings: false,
 
             settings_input,
+
+            settings_model_idx: 0,
+
+            settings_editing: false,
+
+            settings_scroll_offset: 0,
 
             config,
 
@@ -521,10 +528,12 @@ impl<'a> App<'a> {
     }
     
     pub fn cycle_model(&mut self) {
-        self.selected_model = match self.selected_model {
-            Model::Gemini => Model::Echo,
-            Model::Echo => Model::Gemini,
-        };
+        self.config.cycle_model();
+        let _ = self.config.save();
+    }
+
+    pub fn get_selected_model_name(&self) -> String {
+        self.config.get_selected_model().display_name()
     }
     
     pub fn toggle_theme(&mut self) {
@@ -558,12 +567,11 @@ impl<'a> App<'a> {
         self.chat_history.push(format!("You: {}", content));
 
         let tx = self.event_tx.clone();
-        let model = self.selected_model.clone();
+        let model_config = self.config.get_selected_model().clone();
         let history = self.chat_history.clone();
-        let api_key = self.config.gemini_api_key.clone();
 
         tokio::spawn(async move {
-            let response = match send_message(model, &history, &content, api_key).await {
+            let response = match send_message(&model_config, &history, &content).await {
                 Ok(resp) => resp,
                 Err(e) => format!("Error: {}", e),
             };
@@ -592,6 +600,96 @@ impl<'a> App<'a> {
                 ("About", Action::About),
             ],
             _ => vec![],
+        }
+    }
+
+    /// Open settings and load current model's API key
+    pub fn open_settings(&mut self) {
+        self.show_settings = true;
+        self.settings_model_idx = 0;
+        self.settings_editing = false;
+        self.settings_scroll_offset = 0;
+        self.load_settings_for_model(0);
+    }
+
+    /// Navigate to next model in settings
+    pub fn settings_select_next(&mut self) {
+        if !self.config.models.is_empty() {
+            // Save current if editing
+            if self.settings_editing {
+                self.save_current_model_key();
+            }
+            self.settings_model_idx = (self.settings_model_idx + 1) % self.config.models.len();
+            self.settings_editing = false;
+            self.load_settings_for_model(self.settings_model_idx);
+        }
+    }
+
+    /// Navigate to previous model in settings
+    pub fn settings_select_prev(&mut self) {
+        if !self.config.models.is_empty() {
+            // Save current if editing
+            if self.settings_editing {
+                self.save_current_model_key();
+            }
+            self.settings_model_idx = if self.settings_model_idx == 0 {
+                self.config.models.len() - 1
+            } else {
+                self.settings_model_idx - 1
+            };
+            self.settings_editing = false;
+            self.load_settings_for_model(self.settings_model_idx);
+        }
+    }
+
+    /// Start editing the current model's API key
+    pub fn settings_start_edit(&mut self) {
+        self.settings_editing = true;
+    }
+
+    /// Stop editing and save
+    pub fn settings_stop_edit(&mut self) {
+        if self.settings_editing {
+            self.save_current_model_key();
+            self.settings_editing = false;
+        }
+    }
+
+    /// Save just the current model's API key (without closing settings)
+    fn save_current_model_key(&mut self) {
+        let api_key = self.settings_input.lines().join("");
+        let api_key = if api_key.trim().is_empty() {
+            None
+        } else {
+            Some(api_key.trim().to_string())
+        };
+
+        if let Some(model) = self.config.models.get_mut(self.settings_model_idx) {
+            model.api_key = api_key;
+        }
+        let _ = self.config.save();
+    }
+
+    /// Set the selected model as the active model for chat
+    pub fn settings_set_active_model(&mut self) {
+        self.config.selected_model_idx = self.settings_model_idx;
+        let _ = self.config.save();
+    }
+
+    /// Load the API key for the specified model into the settings input
+    pub fn load_settings_for_model(&mut self, idx: usize) {
+        self.settings_model_idx = idx;
+        // Clear and reload
+        while self.settings_input.delete_char() {}
+        while self.settings_input.delete_newline() {}
+        // Select all and delete to clear
+        self.settings_input.select_all();
+        self.settings_input.cut();
+
+        if let Some(model) = self.config.models.get(idx) {
+            if let Some(key) = &model.api_key {
+                self.settings_input.insert_str(key);
+            }
         }
     }
 

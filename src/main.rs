@@ -126,29 +126,46 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                     if let Event::Key(key) = input {
                         // Settings Mode Handling
                         if app.show_settings {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    app.show_settings = false;
-                                    // Reset input to current config value on cancel
-                                    app.settings_input = TextArea::default();
-                                    app.settings_input.set_block(Block::default().borders(Borders::ALL).title(" Gemini API Key "));
-                                    if let Some(key) = &app.config.gemini_api_key {
-                                        app.settings_input.insert_str(key);
+                            if app.settings_editing {
+                                // Editing mode: handle text input
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        // Cancel editing, reload original value
+                                        app.load_settings_for_model(app.settings_model_idx);
+                                        app.settings_editing = false;
+                                    },
+                                    KeyCode::Enter => {
+                                        // Save and stop editing
+                                        app.settings_stop_edit();
+                                    },
+                                    _ => {
+                                        app.settings_input.input(key);
                                     }
-                                },
-                                KeyCode::Tab => {
-                                    app.toggle_theme();
-                                },
-                                KeyCode::Enter => {
-                                    let key = app.settings_input.lines()[0].trim().to_string();
-                                    if !key.is_empty() {
-                                        app.config.gemini_api_key = Some(key);
-                                        let _ = app.config.save();
-                                    }
-                                    app.show_settings = false;
-                                },
-                                _ => {
-                                    app.settings_input.input(key);
+                                }
+                            } else {
+                                // Navigation mode
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.show_settings = false;
+                                    },
+                                    KeyCode::Tab => {
+                                        app.toggle_theme();
+                                    },
+                                    KeyCode::Up => {
+                                        app.settings_select_prev();
+                                    },
+                                    KeyCode::Down => {
+                                        app.settings_select_next();
+                                    },
+                                    KeyCode::Enter => {
+                                        // Start editing the API key
+                                        app.settings_start_edit();
+                                    },
+                                    KeyCode::Char(' ') => {
+                                        // Set as active model
+                                        app.settings_set_active_model();
+                                    },
+                                    _ => {}
                                 }
                             }
                             continue;
@@ -232,7 +249,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                     app.cycle_model();
                                 },
                                 Action::OpenSettings => {
-                                    app.show_settings = true;
+                                    app.open_settings();
                                 },
                                 Action::Copy => {
                                     if app.active_panel == ActivePanel::Editor {
@@ -346,7 +363,7 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>, app: &mut Ap
                                         // Execute the action
                                         match action {
                                             Action::Quit => app.should_quit = true,
-                                            Action::OpenSettings => app.show_settings = true,
+                                            Action::OpenSettings => app.open_settings(),
                                             Action::FileSearch => {
                                                 app.is_searching = true;
                                                 app.on_search_input();

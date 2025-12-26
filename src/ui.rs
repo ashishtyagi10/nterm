@@ -160,36 +160,40 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         &mut app.file_tree_scroll_state
     );
 
-    // Editor
-    let editor_title = app.editor_state.file_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| format!(" Editor - {} ", n.to_string_lossy()))
-        .unwrap_or_else(|| " Editor ".to_string());
+    // Editor (or Settings when show_settings is true)
+    if app.show_settings {
+        render_settings_panel(f, app, layout.editor);
+    } else {
+        let editor_title = app.editor_state.file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| format!(" Editor - {} ", n.to_string_lossy()))
+            .unwrap_or_else(|| " Editor ".to_string());
 
-    let editor_widget = EditorWidget::new()
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .title(editor_title)
-            .border_style(if app.active_panel == ActivePanel::Editor {
-                Style::default().fg(app.current_theme.border_active)
-            } else {
-                Style::default().fg(app.current_theme.border)
-            }))
-        .line_number_style(Style::default().fg(app.current_theme.line_number))
-        .cursor_style(Style::default().bg(app.current_theme.cursor_bg).fg(app.current_theme.cursor_fg))
-        .focused(app.active_panel == ActivePanel::Editor);
+        let editor_widget = EditorWidget::new()
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(editor_title)
+                .border_style(if app.active_panel == ActivePanel::Editor {
+                    Style::default().fg(app.current_theme.border_active)
+                } else {
+                    Style::default().fg(app.current_theme.border)
+                }))
+            .line_number_style(Style::default().fg(app.current_theme.line_number))
+            .cursor_style(Style::default().bg(app.current_theme.cursor_bg).fg(app.current_theme.cursor_fg))
+            .focused(app.active_panel == ActivePanel::Editor);
 
-    f.render_stateful_widget(editor_widget, layout.editor, &mut app.editor_state);
+        f.render_stateful_widget(editor_widget, layout.editor, &mut app.editor_state);
 
-    f.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼")),
-        layout.editor,
-        &mut app.editor_scroll_state
-    );
+        f.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼")),
+            layout.editor,
+            &mut app.editor_scroll_state
+        );
+    }
 
     // Terminal
     let terminal_border_style = if app.active_panel == ActivePanel::Terminal {
@@ -243,7 +247,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     // Chat
     let chat_text = app.chat_history.join("\n\n");
     let chat_history_block = Block::default()
-        .title(format!(" AI Chat ({}) (Ctrl+M to Switch) ", app.selected_model))
+        .title(format!(" AI Chat ({}) (Ctrl+M to Switch) ", app.get_selected_model_name()))
         .borders(Borders::ALL)
         .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) })
         .style(Style::default().bg(app.current_theme.background));
@@ -371,21 +375,230 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_stateful_widget(list, chunks[1], &mut app.search_state);
     }
 
-    // --- Settings Modal ---
-    if app.show_settings {
-        let area = centered_rect(60, 20, f.area());
-        f.render_widget(Clear, area);
-        
-        let block = Block::default()
-            .title(format!(" Settings - Gemini API Key (Enter to Save, Tab to Toggle Theme: {:?}) ", app.config.theme))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.current_theme.border))
-            .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
-            
-        let inner_area = block.inner(area);
-        f.render_widget(block, area);
-        f.render_widget(&app.settings_input, inner_area);
+}
+
+/// Render the settings panel in the editor area with two-column form layout
+fn render_settings_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.current_theme.border_active))
+        .style(Style::default().bg(app.current_theme.background).fg(app.current_theme.foreground));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Calculate layout: header, model list, footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),  // Header/instructions
+            Constraint::Min(0),     // Model list
+            Constraint::Length(1),  // Footer
+        ])
+        .split(inner_area);
+
+    // Header with keyboard shortcuts
+    let header = Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(app.current_theme.directory).add_modifier(Modifier::BOLD)),
+        Span::styled(" Navigate  ", Style::default().fg(app.current_theme.line_number)),
+        Span::styled("Enter", Style::default().fg(app.current_theme.directory).add_modifier(Modifier::BOLD)),
+        Span::styled(" Edit  ", Style::default().fg(app.current_theme.line_number)),
+        Span::styled("Space", Style::default().fg(app.current_theme.directory).add_modifier(Modifier::BOLD)),
+        Span::styled(" Set Active  ", Style::default().fg(app.current_theme.line_number)),
+        Span::styled("Tab", Style::default().fg(app.current_theme.directory).add_modifier(Modifier::BOLD)),
+        Span::styled(" Theme  ", Style::default().fg(app.current_theme.line_number)),
+        Span::styled("Esc", Style::default().fg(app.current_theme.directory).add_modifier(Modifier::BOLD)),
+        Span::styled(" Close", Style::default().fg(app.current_theme.line_number)),
+    ]);
+    f.render_widget(Paragraph::new(header), chunks[0]);
+
+    // Model list area
+    let list_area = chunks[1];
+    let visible_height = list_area.height as usize;
+    let total_models = app.config.models.len();
+
+    // Each model card takes 4 lines (top border, content row 1, content row 2, bottom border)
+    // But we can share borders between adjacent cards
+    let lines_per_model = 3usize; // top border shared, 2 content lines, bottom becomes next top
+
+    // Update scroll to keep selected model visible
+    let selected_start_line = app.settings_model_idx * lines_per_model;
+    if selected_start_line < app.settings_scroll_offset {
+        app.settings_scroll_offset = selected_start_line;
+    } else if selected_start_line + lines_per_model > app.settings_scroll_offset + visible_height {
+        app.settings_scroll_offset = (selected_start_line + lines_per_model).saturating_sub(visible_height);
     }
+
+    // Calculate column widths for the form layout
+    let label_width = 12u16; // "API Key:" etc
+    let total_width = list_area.width;
+
+    // Build all lines for all models with box drawing
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, model) in app.config.models.iter().enumerate() {
+        let is_selected = i == app.settings_model_idx;
+        let is_active = i == app.config.selected_model_idx;
+
+        // Determine border style based on selection
+        let border_style = if is_selected {
+            Style::default().fg(app.current_theme.border_active)
+        } else {
+            Style::default().fg(app.current_theme.border)
+        };
+
+        // Top border with model name
+        let status_icon = if model.api_key.is_some() { "✓" } else { "✗" };
+        let status_style = if model.api_key.is_some() {
+            Style::default().fg(app.current_theme.directory)
+        } else {
+            Style::default().fg(app.current_theme.file)
+        };
+
+        // Calculate remaining space for border line after model name
+        let name_section_len = model.name.len() + 5 + if is_active { 9 } else { 0 }; // " [✓]" + " ★ ACTIVE"
+        let remaining = total_width.saturating_sub(name_section_len as u16 + 4) as usize;
+
+        let mut top_spans = vec![
+            Span::styled("┌ ", border_style),
+        ];
+
+        // Model name styling
+        let name_style = if is_selected {
+            Style::default().fg(app.current_theme.selection_fg).bg(app.current_theme.selection_bg).add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(app.current_theme.border_active).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.current_theme.foreground).add_modifier(Modifier::BOLD)
+        };
+
+        top_spans.push(Span::styled(model.name.clone(), name_style));
+        top_spans.push(Span::styled(" [", border_style));
+        top_spans.push(Span::styled(status_icon, status_style));
+        top_spans.push(Span::styled("]", border_style));
+        if is_active {
+            top_spans.push(Span::styled(" ★ ACTIVE", Style::default().fg(app.current_theme.border_active)));
+        }
+        top_spans.push(Span::styled(" ".to_string() + &"─".repeat(remaining.saturating_sub(if is_active { 9 } else { 0 })) + "┐", border_style));
+
+        all_lines.push(Line::from(top_spans));
+
+        // Row 1: Provider | Model ID
+        let provider_label = "Provider:";
+        let model_label = "Model:";
+        let provider_value = format!("{}", model.provider);
+        let model_value = model.model_id.clone();
+
+        let row1 = Line::from(vec![
+            Span::styled("│ ", border_style),
+            Span::styled(format!("{:<width$}", provider_label, width = label_width as usize), Style::default().fg(app.current_theme.line_number)),
+            Span::styled(format!("{:<15}", provider_value), Style::default().fg(app.current_theme.foreground)),
+            Span::styled(format!("{:<8}", model_label), Style::default().fg(app.current_theme.line_number)),
+            Span::styled(model_value.clone(), Style::default().fg(app.current_theme.foreground)),
+            Span::styled(format!("{:>width$}│", "", width = total_width.saturating_sub(label_width + 15 + 8 + model_value.len() as u16 + 4) as usize), border_style),
+        ]);
+        all_lines.push(row1);
+
+        // Row 2: API Key (with editing support)
+        let api_label = "API Key:";
+        let key_display = if is_selected && app.settings_editing {
+            "[editing...]".to_string()
+        } else {
+            match &model.api_key {
+                Some(key) if !key.is_empty() => {
+                    if key.len() > 4 {
+                        format!("{}...{}", "*".repeat(8), &key[key.len()-4..])
+                    } else {
+                        "*".repeat(key.len())
+                    }
+                },
+                _ => "(not set - press Enter to configure)".to_string(),
+            }
+        };
+
+        let key_style = if is_selected && app.settings_editing {
+            Style::default().fg(app.current_theme.cursor_bg)
+        } else if model.api_key.is_some() {
+            Style::default().fg(app.current_theme.directory)
+        } else {
+            Style::default().fg(app.current_theme.file).add_modifier(Modifier::ITALIC)
+        };
+
+        let key_display_len = key_display.len();
+        let row2 = Line::from(vec![
+            Span::styled("│ ", border_style),
+            Span::styled(format!("{:<width$}", api_label, width = label_width as usize), Style::default().fg(app.current_theme.line_number)),
+            Span::styled(key_display, key_style),
+            Span::styled(format!("{:>width$}│", "", width = total_width.saturating_sub(label_width + key_display_len as u16 + 4) as usize), border_style),
+        ]);
+        all_lines.push(row2);
+
+        // Bottom border
+        let bottom_border = format!("└{}┘", "─".repeat(total_width.saturating_sub(2) as usize));
+        all_lines.push(Line::from(Span::styled(bottom_border, border_style)));
+    }
+
+    // Apply scroll offset and render visible lines
+    let visible_lines: Vec<Line<'static>> = all_lines
+        .into_iter()
+        .skip(app.settings_scroll_offset)
+        .take(visible_height)
+        .collect();
+
+    f.render_widget(Paragraph::new(visible_lines), list_area);
+
+    // If editing, render the TextArea over the API key value
+    if app.settings_editing {
+        // Find the API key line position (each model has 4 lines: top, row1, row2, bottom)
+        // API key is in row2, which is index 2 within each model's lines
+        let lines_per_model_with_border = 4usize;
+        let selected_api_line = app.settings_model_idx * lines_per_model_with_border + 2;
+        let line_in_view = selected_api_line.saturating_sub(app.settings_scroll_offset);
+
+        if line_in_view < visible_height {
+            let input_y = list_area.y + line_in_view as u16;
+            let input_x = list_area.x + 2 + label_width; // After "│ " and label
+            let input_width = total_width.saturating_sub(label_width + 6);
+
+            let input_area = Rect::new(input_x, input_y, input_width, 1);
+            f.render_widget(Clear, input_area);
+
+            let input_text = app.settings_input.lines().join("");
+            let display_text = if input_text.is_empty() {
+                "█".to_string()
+            } else {
+                format!("{}█", input_text)
+            };
+
+            f.render_widget(
+                Paragraph::new(display_text)
+                    .style(Style::default().fg(app.current_theme.foreground).bg(app.current_theme.background)),
+                input_area
+            );
+        }
+    }
+
+    // Footer with theme info
+    let footer = Line::from(vec![
+        Span::styled(format!("Theme: {:?} │ Models: {}", app.config.theme, total_models), Style::default().fg(app.current_theme.line_number)),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[2]);
+
+    // Scrollbar
+    let total_lines = total_models * 4; // 4 lines per model with borders
+    let mut scroll_state = ratatui::widgets::ScrollbarState::default()
+        .content_length(total_lines)
+        .position(app.settings_scroll_offset);
+
+    f.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼")),
+        list_area,
+        &mut scroll_state
+    );
 }
 
 /// Parse markdown text and return styled Lines for rendering
