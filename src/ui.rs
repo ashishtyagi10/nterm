@@ -1,6 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
     Frame,
 };
@@ -8,6 +9,7 @@ use tui_term::widget::PseudoTerminal;
 
 use crate::app::{App, ActivePanel};
 use crate::editor::EditorWidget;
+use crate::theme::Theme;
 
 pub struct AppLayout {
     pub menu: Rect,
@@ -243,18 +245,35 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let chat_history_block = Block::default()
         .title(format!(" AI Chat ({}) (Ctrl+M to Switch) ", app.selected_model))
         .borders(Borders::ALL)
-        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) });
+        .border_style(if app.active_panel == ActivePanel::Chat { Style::default().fg(app.current_theme.border_active) } else { Style::default().fg(app.current_theme.border) })
+        .style(Style::default().bg(app.current_theme.background));
 
-    // Calculate max scroll based on content height
-    let chat_inner_height = layout.chat_history.height.saturating_sub(2) as usize; // Subtract borders
-    let total_lines = chat_text.lines().count();
-    let max_scroll = total_lines.saturating_sub(chat_inner_height) as u16;
+    // Parse markdown for styled rendering
+    let chat_lines = parse_markdown_to_lines(&chat_text, &app.current_theme);
+
+    // Calculate wrapped line count for proper scroll limits
+    let chat_inner_width = layout.chat_history.width.saturating_sub(2) as usize; // Subtract borders
+    let chat_inner_height = layout.chat_history.height.saturating_sub(2) as usize;
+
+    // Estimate wrapped lines (each line wraps based on width)
+    let wrapped_lines: usize = chat_lines.iter()
+        .map(|line| {
+            let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if line_width == 0 {
+                1
+            } else {
+                (line_width + chat_inner_width - 1) / chat_inner_width.max(1)
+            }
+        })
+        .sum();
+
+    let max_scroll = wrapped_lines.saturating_sub(chat_inner_height) as u16;
     app.chat_scroll = app.chat_scroll.min(max_scroll);
 
-    // Create paragraph with style
-    let chat_paragraph = Paragraph::new(chat_text)
+    // Create paragraph with styled lines
+    // Note: Don't set a default style here as it would override span styles
+    let chat_paragraph = Paragraph::new(chat_lines)
         .block(chat_history_block)
-        .style(Style::default().fg(app.current_theme.foreground))
         .wrap(Wrap { trim: true })
         .scroll((app.chat_scroll, 0));
 
@@ -369,6 +388,258 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Parse markdown text and return styled Lines for rendering
+fn parse_markdown_to_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut in_code_block = false;
+    let mut code_block_lines: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        // Check for code block start/end - handle even if line has prefix like "AI: ```"
+        let trimmed_for_code = line.trim_start_matches("AI: ").trim_start_matches("You: ");
+
+        if trimmed_for_code.starts_with("```") {
+            if in_code_block {
+                // End of code block - render accumulated code
+                for code_line in &code_block_lines {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("│ {}", code_line),
+                            Style::default()
+                                .fg(theme.directory)
+                                .bg(theme.selection_bg),
+                        ),
+                    ]));
+                }
+                code_block_lines.clear();
+                in_code_block = false;
+            } else {
+                // Start of code block
+                // If line starts with AI: or You:, show that prefix first
+                if line.starts_with("AI:") {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "AI: ".to_string(),
+                            Style::default()
+                                .fg(theme.selection_fg)
+                                .bg(theme.border_active)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                } else if line.starts_with("You:") {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "You: ".to_string(),
+                            Style::default()
+                                .fg(theme.cursor_fg)
+                                .bg(theme.cursor_bg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                in_code_block = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_block_lines.push(line.to_string());
+            continue;
+        }
+
+        // Handle headers
+        if line.starts_with("### ") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    line[4..].to_string(),
+                    Style::default()
+                        .fg(theme.border_active)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else if line.starts_with("## ") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    line[3..].to_string(),
+                    Style::default()
+                        .fg(theme.border_active)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ),
+            ]));
+        } else if line.starts_with("# ") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    line[2..].to_string(),
+                    Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.selection_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        // Handle bullet lists
+        else if line.starts_with("- ") || line.starts_with("* ") {
+            lines.push(Line::from(vec![
+                Span::styled("  • ".to_string(), Style::default().fg(theme.border_active)),
+                Span::styled(line[2..].to_string(), Style::default().fg(theme.foreground)),
+            ]));
+        }
+        // Handle numbered lists
+        else if line.len() > 2 && line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && (line.contains(". ") || line.contains(") ")) {
+            let split_pos = line.find(". ").or_else(|| line.find(") "));
+            if let Some(pos) = split_pos {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} ", &line[..=pos]),
+                        Style::default().fg(theme.border_active),
+                    ),
+                    Span::styled(line[pos + 2..].to_string(), Style::default().fg(theme.foreground)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(line.to_string())));
+            }
+        }
+        // Handle "You:" prefix (user messages)
+        else if line.starts_with("You:") {
+            let rest = if line.len() > 4 { &line[4..] } else { "" };
+            // Check if the rest of the message contains inline markdown
+            let rest_spans = if rest.contains('`') || rest.contains("**") {
+                parse_inline_markdown(rest, theme)
+            } else {
+                vec![Span::styled(rest.to_string(), Style::default().fg(theme.foreground))]
+            };
+            let mut spans = vec![
+                Span::styled(
+                    "You: ".to_string(),
+                    Style::default()
+                        .fg(theme.cursor_fg)
+                        .bg(theme.cursor_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            spans.extend(rest_spans);
+            lines.push(Line::from(spans));
+        }
+        // Handle "AI:" prefix (AI messages)
+        else if line.starts_with("AI:") {
+            let rest = if line.len() > 3 { &line[3..] } else { "" };
+            // Check if the rest of the message contains inline markdown
+            let rest_spans = if rest.contains('`') || rest.contains("**") {
+                parse_inline_markdown(rest, theme)
+            } else {
+                vec![Span::styled(rest.to_string(), Style::default().fg(theme.foreground))]
+            };
+            let mut spans = vec![
+                Span::styled(
+                    "AI: ".to_string(),
+                    Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.border_active)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            spans.extend(rest_spans);
+            lines.push(Line::from(spans));
+        }
+        // Handle inline code and bold
+        else if line.contains('`') || line.contains("**") {
+            let styled_spans = parse_inline_markdown(line, theme);
+            lines.push(Line::from(styled_spans));
+        }
+        // Regular text
+        else {
+            lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(theme.foreground))));
+        }
+    }
+
+    // Handle unclosed code block
+    if in_code_block {
+        for code_line in &code_block_lines {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("│ {}", code_line),
+                    Style::default()
+                        .fg(theme.directory)
+                        .bg(theme.selection_bg),
+                ),
+            ]));
+        }
+    }
+
+    lines
+}
+
+/// Parse inline markdown (backticks for code, ** for bold)
+fn parse_inline_markdown(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut current_pos = 0;
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+
+    while current_pos < len {
+        // Check for inline code (backtick)
+        if chars[current_pos] == '`' && current_pos + 1 < len {
+            // Find closing backtick
+            if let Some(end_pos) = chars[current_pos + 1..].iter().position(|&c| c == '`') {
+                let end_pos = current_pos + 1 + end_pos;
+                let code_text: String = chars[current_pos + 1..end_pos].iter().collect();
+                spans.push(Span::styled(
+                    format!(" {} ", code_text),
+                    Style::default()
+                        .fg(theme.directory)
+                        .bg(theme.selection_bg),
+                ));
+                current_pos = end_pos + 1;
+                continue;
+            }
+        }
+
+        // Check for bold (**)
+        if current_pos + 1 < len && chars[current_pos] == '*' && chars[current_pos + 1] == '*' {
+            // Find closing **
+            let search_start = current_pos + 2;
+            let mut found_end = None;
+            for i in search_start..len.saturating_sub(1) {
+                if chars[i] == '*' && chars[i + 1] == '*' {
+                    found_end = Some(i);
+                    break;
+                }
+            }
+            if let Some(end_pos) = found_end {
+                let bold_text: String = chars[current_pos + 2..end_pos].iter().collect();
+                spans.push(Span::styled(
+                    bold_text,
+                    Style::default()
+                        .fg(theme.foreground)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                current_pos = end_pos + 2;
+                continue;
+            }
+        }
+
+        // Regular character - accumulate until special char
+        let start = current_pos;
+        while current_pos < len && chars[current_pos] != '`' && !(current_pos + 1 < len && chars[current_pos] == '*' && chars[current_pos + 1] == '*') {
+            current_pos += 1;
+        }
+        if start < current_pos {
+            let regular_text: String = chars[start..current_pos].iter().collect();
+            spans.push(Span::styled(regular_text, Style::default().fg(theme.foreground)));
+        }
+
+        // Prevent infinite loop
+        if current_pos == start {
+            let ch: String = chars[current_pos..current_pos + 1].iter().collect();
+            spans.push(Span::styled(ch, Style::default().fg(theme.foreground)));
+            current_pos += 1;
+        }
+    }
+
+    spans
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -406,20 +677,65 @@ mod tests {
         assert!(layout.terminal.area() > 0);
         assert!(layout.chat_history.area() > 0);
         assert!(layout.chat_input.area() > 0);
-        
+
         // Basic split checks
         assert_eq!(layout.menu.y, 0);
         assert_eq!(layout.menu.height, 1);
     }
-    
+
     #[test]
     fn test_centered_rect() {
         let area = Rect::new(0, 0, 100, 100);
         let center = centered_rect(50, 50, area);
-        
+
         assert_eq!(center.width, 50);
         assert_eq!(center.height, 50);
         assert_eq!(center.x, 25);
         assert_eq!(center.y, 25);
+    }
+
+    #[test]
+    fn test_parse_markdown_to_lines() {
+        let theme = Theme::new(crate::theme::ThemeMode::Dark);
+
+        // Test "You:" prefix
+        let lines = parse_markdown_to_lines("You: Hello world", &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans.len() >= 2);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "You: ");
+
+        // Test "AI:" prefix
+        let lines = parse_markdown_to_lines("AI: Here is my response", &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans.len() >= 2);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "AI: ");
+
+        // Test headers
+        let lines = parse_markdown_to_lines("# Header 1", &theme);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "Header 1");
+
+        // Test bullet list
+        let lines = parse_markdown_to_lines("- List item", &theme);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "  • ");
+
+        // Test code block
+        let code_text = "```\nlet x = 1;\n```";
+        let lines = parse_markdown_to_lines(code_text, &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans[0].content.contains("let x = 1;"));
+
+        // Test code block with AI: prefix
+        let ai_code = "AI: ```python\ndef foo():\n    pass\n```";
+        let lines = parse_markdown_to_lines(ai_code, &theme);
+        assert!(lines.len() >= 2); // AI: prefix line + code lines
+        assert_eq!(lines[0].spans[0].content.as_ref(), "AI: ");
+
+        // Test inline code
+        let lines = parse_markdown_to_lines("Use `code` here", &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans.len() >= 2); // "Use ", " code ", " here"
     }
 }
