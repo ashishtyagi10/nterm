@@ -11,7 +11,7 @@ use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use iced::keyboard::{self, Key};
 use iced::mouse;
 
-use crate::shared::{Config, flatten_node, FileNode, VisibleItem, ThemeMode};
+use crate::shared::{Config, flatten_node, FileNode, VisibleItem, ThemeMode, send_message};
 
 use super::message::{Divider, Message, Panel};
 use super::syntax::SyntaxHighlighter;
@@ -302,9 +302,30 @@ impl NtermGui {
                     let user_msg = self.chat_input.clone();
                     self.chat_messages.push(("You".to_string(), user_msg.clone()));
                     self.chat_input.clear();
-                    // For now, echo back - TODO: integrate with AI
-                    self.chat_messages.push(("AI".to_string(), format!("Echo: {}", user_msg)));
+
+                    let model_config = self.config.get_selected_model().clone();
+                    let history = Vec::new(); // History currently unused by client
+                    
+                    return Task::perform(
+                        async move {
+                            send_message(&model_config, &history, &user_msg).await
+                        },
+                        Message::ChatResponse
+                    );
                 }
+            }
+            Message::ChatResponse(result) => {
+                match result {
+                    Ok(response) => {
+                        self.chat_messages.push(("AI".to_string(), response));
+                    }
+                    Err(error) => {
+                        self.chat_messages.push(("System".to_string(), format!("Error: {}", error)));
+                    }
+                }
+            }
+            Message::CycleModel => {
+                self.cycle_model();
             }
             Message::ToggleTheme => {
                 self.theme_mode = match self.theme_mode {
@@ -455,6 +476,10 @@ impl NtermGui {
                 self.colors = TerminalColors::from_mode(self.theme_mode);
                 self.config.theme = self.theme_mode;
                 let _ = self.config.save();
+                return Task::none();
+            }
+            Key::Character("m") if modifiers.control() => {
+                self.cycle_model();
                 return Task::none();
             }
             Key::Character("q") if modifiers.control() => {
@@ -1237,6 +1262,13 @@ impl NtermGui {
             .unwrap_or_else(|| "nterm".to_string());
 
         format!("nterm - {}", workspace)
+    }
+
+    fn cycle_model(&mut self) {
+        self.config.cycle_model();
+        let _ = self.config.save();
+        let model_name = self.config.get_selected_model().display_name();
+        self.chat_messages.push(("System".to_string(), format!("Switched model to: {}", model_name)));
     }
 }
 

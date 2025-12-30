@@ -32,6 +32,8 @@ pub enum Message {
     // Chat
     ChatInputChanged(String),
     ChatSend,
+    ChatResponse(Result<String, String>),
+    CycleModel,
 
     // Theme
     ToggleTheme,
