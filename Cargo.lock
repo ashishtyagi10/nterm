@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "nterm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "alacritty_terminal",
  "arboard",
