@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_input, Column, Row, Space,
+    button, column, container, markdown, mouse_area, row, scrollable, text, text_input, Column, Row, Space,
 };
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use iced::keyboard::{self, Key};
@@ -56,6 +56,23 @@ impl PanelSizes {
     }
 }
 
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    pub parsed_content: Vec<markdown::Item>,
+}
+
+impl ChatMessage {
+    pub fn new(role: String, content: String) -> Self {
+        let parsed_content = markdown::parse(&content).collect();
+        Self {
+            role,
+            content,
+            parsed_content,
+        }
+    }
+}
+
 pub struct NtermGui {
     // Core state (reused from TUI)
     config: Config,
@@ -72,7 +89,7 @@ pub struct NtermGui {
     terminal_view: TerminalView,
 
     // Chat state
-    chat_messages: Vec<(String, String)>, // (role, content)
+    chat_messages: Vec<ChatMessage>,
     chat_input: String,
 
     // UI state
@@ -114,7 +131,7 @@ impl NtermGui {
             editor_scroll: 0,
             terminal_view: TerminalView::new(),
             chat_messages: vec![
-                ("System".to_string(), "Welcome to nterm AI Chat".to_string()),
+                ChatMessage::new("System".to_string(), "Welcome to nterm AI Chat".to_string()),
             ],
             chat_input: String::new(),
             theme_mode,
@@ -279,7 +296,7 @@ impl NtermGui {
             Message::TerminalStart => {
                 if !self.terminal_view.is_running() {
                     if let Err(e) = self.terminal_view.start() {
-                        self.chat_messages.push((
+                        self.chat_messages.push(ChatMessage::new(
                             "System".to_string(),
                             format!("Failed to start terminal: {}", e),
                         ));
@@ -300,7 +317,7 @@ impl NtermGui {
             Message::ChatSend => {
                 if !self.chat_input.trim().is_empty() {
                     let user_msg = self.chat_input.clone();
-                    self.chat_messages.push(("You".to_string(), user_msg.clone()));
+                    self.chat_messages.push(ChatMessage::new("You".to_string(), user_msg.clone()));
                     self.chat_input.clear();
 
                     let model_config = self.config.get_selected_model().clone();
@@ -317,12 +334,23 @@ impl NtermGui {
             Message::ChatResponse(result) => {
                 match result {
                     Ok(response) => {
-                        self.chat_messages.push(("AI".to_string(), response));
+                        self.chat_messages.push(ChatMessage::new("AI".to_string(), response));
                     }
                     Err(error) => {
-                        self.chat_messages.push(("System".to_string(), format!("Error: {}", error)));
+                        self.chat_messages.push(ChatMessage::new("System".to_string(), format!("Error: {}", error)));
                     }
                 }
+            }
+            Message::ChatLinkClicked(url) => {
+                // TODO: specific OS open command
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd").args(&["/C", "start", &url]).spawn();
+
+                self.chat_messages.push(ChatMessage::new("System".to_string(), format!("Opening link: {}", url)));
             }
             Message::CycleModel => {
                 self.cycle_model();
@@ -366,7 +394,7 @@ impl NtermGui {
             Message::MenuSettings => {
                 self.menu_open_idx = None;
                 // TODO: show settings modal
-                self.chat_messages.push((
+                self.chat_messages.push(ChatMessage::new(
                     "System".to_string(),
                     "Settings not yet implemented in GUI".to_string(),
                 ));
@@ -374,7 +402,7 @@ impl NtermGui {
             Message::MenuFileSearch => {
                 self.menu_open_idx = None;
                 // TODO: show file search modal
-                self.chat_messages.push((
+                self.chat_messages.push(ChatMessage::new(
                     "System".to_string(),
                     "File search not yet implemented in GUI".to_string(),
                 ));
@@ -410,7 +438,7 @@ impl NtermGui {
             // Help menu actions
             Message::MenuAbout => {
                 self.menu_open_idx = None;
-                self.chat_messages.push((
+                self.chat_messages.push(ChatMessage::new(
                     "System".to_string(),
                     "nterm v0.1.0 - A terminal-based IDE".to_string(),
                 ));
@@ -1116,7 +1144,8 @@ impl NtermGui {
         let messages: Vec<Element<'_, Message>> = self
             .chat_messages
             .iter()
-            .map(|(role, content)| {
+            .map(|msg| {
+                let role = &msg.role;
                 let role_color = if role == "You" {
                     colors.foreground
                 } else if role == "AI" {
@@ -1130,15 +1159,18 @@ impl NtermGui {
                     .font(Font::MONOSPACE)
                     .color(role_color);
 
-                let content_text = text(content)
-                    .size(FONT_SIZE)
-                    .font(Font::MONOSPACE)
-                    .color(colors.foreground);
+                let content_view = markdown::view(
+                    &msg.parsed_content, 
+                    markdown::Settings::default(),
+                    markdown::Style::from_palette(self.theme().palette())
+                )
+                .map(|url| Message::ChatLinkClicked(url.to_string()));
 
                 column![
-                    row![role_text, content_text],
+                    role_text,
+                    content_view,
                 ]
-                .spacing(2)
+                .spacing(5)
                 .into()
             })
             .collect();
@@ -1268,7 +1300,7 @@ impl NtermGui {
         self.config.cycle_model();
         let _ = self.config.save();
         let model_name = self.config.get_selected_model().display_name();
-        self.chat_messages.push(("System".to_string(), format!("Switched model to: {}", model_name)));
+        self.chat_messages.push(ChatMessage::new("System".to_string(), format!("Switched model to: {}", model_name)));
     }
 }
 

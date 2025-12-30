@@ -41,7 +41,7 @@ parking_lot = "0.12"
 log = "0.4"
 
 # GUI dependencies
-iced = { version = "0.13", features = ["tokio", "canvas"] }
+iced = { version = "0.13", features = ["tokio", "canvas", "markdown", "highlighter"] }
 
 # Terminal emulation (alacritty's terminal library)
 alacritty_terminal = "0.24"

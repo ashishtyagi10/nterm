@@ -33,6 +33,7 @@ pub enum Message {
     ChatInputChanged(String),
     ChatSend,
     ChatResponse(Result<String, String>),
+    ChatLinkClicked(String),
     CycleModel,
 
     // Theme
